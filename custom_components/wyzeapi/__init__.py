@@ -5,7 +5,11 @@ from __future__ import annotations
 import logging
 
 from aiohttp.client_exceptions import ClientConnectorError
-from homeassistant.config_entries import ConfigEntry, ConfigEntryNotReady, SOURCE_IMPORT
+from homeassistant.config_entries import (
+    ConfigEntry,
+    ConfigEntryNotReady,
+    SOURCE_IMPORT,
+)
 from homeassistant.const import CONF_USERNAME, CONF_PASSWORD
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
@@ -31,6 +35,9 @@ from .const import (
 from .coordinator import WyzeLockBoltCoordinator
 from .token_manager import TokenManager
 
+_LOGGER = logging.getLogger(__name__)
+
+# IMPORTANT: binary_sensor must be included
 PLATFORMS = [
     "light",
     "switch",
@@ -43,41 +50,37 @@ PLATFORMS = [
     "cover",
     "number",
     "button",
-]  # Fixme: Re add scene
-_LOGGER = logging.getLogger(__name__)
+]  # Fixme: Re-add scene
 
 
-# noinspection PyUnusedLocal
+def _norm_mac(value: str) -> str:
+    """Normalize MAC-like identifiers for comparison."""
+    return (value or "").replace(":", "").replace("-", "").lower()
+
+
 async def async_setup(
     hass: HomeAssistant, config: HomeAssistantConfig, discovery_info=None
 ):
-    # pylint: disable=unused-argument
     """Set up the WyzeApi domain."""
     if hass.config_entries.async_entries(DOMAIN):
-        _LOGGER.debug(
-            "Nothing to import from configuration.yaml, loading from Integrations",
-        )
+        _LOGGER.debug("Nothing to import from configuration.yaml, loading from Integrations")
         return True
 
-    # noinspection SpellCheckingInspection
     domainconfig = config.get(DOMAIN)
-    # pylint: disable=logging-not-lazy
+    if not domainconfig:
+        return True
+
     _LOGGER.debug(
-        "Importing config information for %s from configuration.yml"
-        % domainconfig[CONF_USERNAME]
+        "Importing config information for %s from configuration.yml",
+        domainconfig.get(CONF_USERNAME),
     )
+
     if hass.config_entries.async_entries(DOMAIN):
-        _LOGGER.debug("Found existing config entries")
         for entry in hass.config_entries.async_entries(DOMAIN):
-            if entry:
-                entry_data = entry.as_dict().get("data")
-                hass.config_entries.async_update_entry(
-                    entry,
-                    data=entry_data,
-                )
-                break
+            entry_data = entry.as_dict().get("data")
+            hass.config_entries.async_update_entry(entry, data=entry_data)
+            break
     else:
-        _LOGGER.debug("Creating new config entry")
         hass.async_create_task(
             hass.config_entries.flow.async_init(
                 DOMAIN,
@@ -96,7 +99,6 @@ async def async_setup(
     return True
 
 
-# noinspection DuplicatedCode
 async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> bool:
     """Set up Wyze Home Assistant Integration from a config entry."""
 
@@ -106,6 +108,7 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
     api_key = config_entry.data.get(API_KEY)
 
     client = await Wyzeapy.create()
+
     token = None
     if config_entry.data.get(ACCESS_TOKEN):
         token = Token(
@@ -113,10 +116,10 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
             config_entry.data.get(REFRESH_TOKEN),
             float(config_entry.data.get(REFRESH_TIME)),
         )
-    a_tkn_manager = TokenManager(hass, config_entry)
-    client.register_for_token_callback(a_tkn_manager.token_callback)
-    # We should probably try/catch here to invalidate the login credentials and throw a notification if we cannot get
-    # a login with the token
+
+    token_manager = TokenManager(hass, config_entry)
+    client.register_for_token_callback(token_manager.token_callback)
+
     try:
         await client.login(
             config_entry.data.get(CONF_USERNAME),
@@ -125,69 +128,69 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
             api_key,
             token,
         )
-    except ClientConnectorError as e:
-        raise ConfigEntryNotReady("Unable to login due to network issues.") from e
-    except AccessTokenError as e:
+    except ClientConnectorError as err:
+        raise ConfigEntryNotReady("Unable to login due to network issues.") from err
+    except AccessTokenError:
         _LOGGER.error(
             "Wyzeapi: Could not login. Please re-login through integration configuration"
         )
-        _LOGGER.error(e)
         raise ConfigEntryAuthFailed("Unable to login, please re-login.") from None
 
     hass.data[DOMAIN][config_entry.entry_id] = {
         CONF_CLIENT: client,
-        "key_id": KEY_ID,
-        "api_key": API_KEY,
+        "key_id": key_id,
+        "api_key": api_key,
     }
+
     await setup_coordinators(hass, config_entry, client)
 
-    options_dict = dict(config_entry.options)  # keep all existing options
+    # IMPORTANT: preserve ALL options (do not wipe motion options)
+    options_dict = dict(config_entry.options)
     options_dict.setdefault(BULB_LOCAL_CONTROL, DEFAULT_LOCAL_CONTROL)
     hass.config_entries.async_update_entry(config_entry, options=options_dict)
 
-
+    # Load platforms
     await hass.config_entries.async_forward_entry_setups(config_entry, PLATFORMS)
 
-    mac_addresses = await client.unique_device_ids
+    # ---- Device registry cleanup (normalized MACs) ----
 
-    mac_addresses.add(WYZE_NOTIFICATION_TOGGLE)
+    mac_addresses = await client.unique_device_ids
+    normalized_macs = {_norm_mac(m) for m in mac_addresses}
+
+    normalized_macs.add(_norm_mac(WYZE_NOTIFICATION_TOGGLE))
 
     hms_service = await client.hms_service
     hms_id = hms_service.hms_id
-    if hms_id is not None:
-        mac_addresses.add(hms_id)
+    if hms_id:
+        normalized_macs.add(_norm_mac(hms_id))
 
     device_registry = dr.async_get(hass)
     for device in dr.async_entries_for_config_entry(
         device_registry, config_entry.entry_id
     ):
         for identifier in device.identifiers:
-            # domain has to remain here. If it is removed the integration will remove all entities for not being in
-            # the mac address list each boot.
             domain, mac = identifier
-            if mac not in mac_addresses:
+            if domain != DOMAIN:
+                continue
+
+            if _norm_mac(mac) not in normalized_macs:
                 _LOGGER.warning(
                     "%s is not in the mac_addresses list, removing the entry", mac
                 )
                 device_registry.async_remove_device(device.id)
+                break
+
     return True
 
 
 async def options_update_listener(hass: HomeAssistant, config_entry: ConfigEntry):
     """Handle options update."""
-    _LOGGER.debug("Updated options")
-    entry_data = config_entry.as_dict().get("data")
-    hass.config_entries.async_update_entry(
-        config_entry,
-        data=entry_data,
-    )
-    _LOGGER.debug("Reload entry: " + config_entry.entry_id)
+    _LOGGER.debug("Updated options, reloading entry")
     await hass.config_entries.async_reload(config_entry.entry_id)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
-
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
 
@@ -195,7 +198,6 @@ async def setup_coordinators(
     hass: HomeAssistant, config_entry: ConfigEntry, client: Wyzeapy
 ):
     """Set up coordinators for Wyze devices that require Bluetooth."""
-    # Check if Bluetooth is active and functioning
     if bluetooth.async_scanner_count(hass, connectable=True) == 0:
         _LOGGER.info(
             "Bluetooth is not active or no scanners available. Skipping WyzeLockBoltCoordinator setup."
@@ -208,5 +210,7 @@ async def setup_coordinators(
             coordinators = hass.data[DOMAIN][config_entry.entry_id].setdefault(
                 "coordinators", {}
             )
-            coordinators[lock.mac] = WyzeLockBoltCoordinator(hass, lock_service, lock)
+            coordinators[lock.mac] = WyzeLockBoltCoordinator(
+                hass, lock_service, lock
+            )
             await coordinators[lock.mac].update_lock_info()
