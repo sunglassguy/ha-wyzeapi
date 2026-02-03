@@ -156,14 +156,10 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         config_entry: config_entries.ConfigEntry,
     ) -> "OptionsFlowHandler":
         """Create the Wyze options flow."""
-        return OptionsFlowHandler(config_entry)
-
+        return OptionsFlowHandler()
 
 class OptionsFlowHandler(config_entries.OptionsFlow):
     """Handle an option flow for Wyze."""
-
-    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        self.config_entry = config_entry
 
     async def async_step_init(self, user_input=None):
         """Handle options flow."""
@@ -175,7 +171,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
 
             return self.async_create_entry(title="", data=user_input)
 
-        opts = self.config_entry.options
+        opts = self.config_entry.options  # <-- use HA-provided config_entry
 
         data_schema = vol.Schema(
             {
@@ -184,25 +180,21 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     default=opts.get(BULB_LOCAL_CONTROL, DEFAULT_LOCAL_CONTROL),
                 ): bool,
 
-                # Motion events (opt-in)
                 vol.Optional(
                     CONF_ENABLE_CAMERA_MOTION,
                     default=opts.get(CONF_ENABLE_CAMERA_MOTION, False),
                 ): bool,
 
-                # Camera MAC to monitor (only used if enabled)
                 vol.Optional(
                     CONF_MOTION_CAMERA_MAC,
                     default=opts.get(CONF_MOTION_CAMERA_MAC, ""),
                 ): str,
 
-                # Poll interval seconds (keep conservative to avoid API load)
                 vol.Optional(
                     CONF_MOTION_POLL_INTERVAL,
                     default=int(opts.get(CONF_MOTION_POLL_INTERVAL, 90)),
                 ): vol.All(vol.Coerce(int), vol.Range(min=30, max=3600)),
 
-                # Hold seconds (how long sensor stays ON after last motion event)
                 vol.Optional(
                     CONF_MOTION_HOLD_SECONDS,
                     default=int(opts.get(CONF_MOTION_HOLD_SECONDS, 15)),
@@ -211,6 +203,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         )
 
         return self.async_show_form(step_id="init", data_schema=data_schema)
+
 
 
 class CannotConnect(HomeAssistantError):
