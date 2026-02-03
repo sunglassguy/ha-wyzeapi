@@ -120,7 +120,7 @@ class WyzeSensor(BinarySensorEntity):
 
     @property
     def available(self) -> bool:
-        return True
+        return bool(self.coordinator.data.get("found"))
 
     @property
     def name(self):
