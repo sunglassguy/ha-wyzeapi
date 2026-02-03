@@ -141,12 +141,10 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
     }
     await setup_coordinators(hass, config_entry, client)
 
-    options_dict = {
-        BULB_LOCAL_CONTROL: config_entry.options.get(
-            BULB_LOCAL_CONTROL, DEFAULT_LOCAL_CONTROL
-        )
-    }
+    options_dict = dict(config_entry.options)  # keep all existing options
+    options_dict.setdefault(BULB_LOCAL_CONTROL, DEFAULT_LOCAL_CONTROL)
     hass.config_entries.async_update_entry(config_entry, options=options_dict)
+
 
     await hass.config_entries.async_forward_entry_setups(config_entry, PLATFORMS)
 
