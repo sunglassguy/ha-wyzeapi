@@ -1,7 +1,7 @@
 """
 This module describes the connection between Home Assistant and Wyze for Binary Sensors
 """
-
+import asyncio
 import logging
 import time
 from datetime import timedelta
@@ -212,15 +212,18 @@ class WyzeCameraMotionEventBinarySensor(CoordinatorEntity, BinarySensorEntity):
         return bool(self.coordinator.data.get("found"))
 
     def _schedule_turn_off(self) -> None:
-        # Ensure we go OFF after hold_seconds even if no new poll occurs
         if self._unsub_off:
             self._unsub_off()
             self._unsub_off = None
 
+        def _cb(_now):
+            # Ensure we run on the HA event loop thread
+            self.hass.loop.call_soon_threadsafe(self.async_schedule_update_ha_state)
+    
         self._unsub_off = async_call_later(
             self.hass,
             self._hold.total_seconds(),
-            lambda _now: self.async_write_ha_state(),
+            _cb,
         )
 
     @property
@@ -234,7 +237,6 @@ class WyzeCameraMotionEventBinarySensor(CoordinatorEntity, BinarySensorEntity):
             self._last_seen_event = ts
             self._schedule_turn_off()
 
-        # wyzeapy camera.last_event_ts is typically ms since epoch
         try:
             event_dt = dt_util.utc_from_timestamp(self._last_seen_event / 1000.0)
         except Exception:
