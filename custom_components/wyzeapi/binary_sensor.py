@@ -1,7 +1,16 @@
 """
-This module describes the connection between Home Assistant and Wyze for Binary Sensors
+This module describes the connection between Home Assistant and Wyze for Binary Sensors.
+
+Design:
+- Keep physical Wyze sensors (PIR/contact) using wyzeapy's update registration.
+- For CAMERA motion: do NOT rely on wyzeapy camera_service.get_cameras()/last_event_ts
+  (doesn't reflect real motion for many users).
+- Instead, optionally add ONE motion binary sensor based on Wyze cloud event_list (v4),
+  mirroring docker-wyze-bridge behavior.
 """
-import asyncio
+
+from __future__ import annotations
+
 import logging
 import time
 from datetime import timedelta
@@ -18,16 +27,11 @@ from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
-from wyzeapy import Wyzeapy, CameraService, SensorService
-from wyzeapy.services.camera_service import Camera
+from wyzeapy import Wyzeapy, SensorService
 from wyzeapy.services.sensor_service import Sensor
 from wyzeapy.types import DeviceTypes
 
 from .token_manager import token_exception_handler
-from .motion_coordinator import WyzeCameraMotionCoordinator
-from .motion_events_coordinator import WyzeMotionEventsCoordinator
-from .wyze_events_api import WyzeEventsApi
-
 from .const import (
     DOMAIN,
     CONF_CLIENT,
@@ -37,9 +41,30 @@ from .const import (
     CONF_MOTION_HOLD_SECONDS,
 )
 
+# NEW (you'll add these files next)
+from .wyze_cloud_events import WyzeCloudEventsApi
+from .motion_events_coordinator import WyzeMotionEventsCoordinator
+
 _LOGGER = logging.getLogger(__name__)
 
 ATTRIBUTION = "Data provided by Wyze"
+
+
+def _normalize_device_id(value: str) -> str:
+    """
+    Wyze bridge passes camera.mac values into device_id_list, typically as
+    an uppercase hex string WITHOUT separators.
+
+    Accept user input in any of these forms:
+      - 7C:78:B2:87:12:50
+      - 7c78b2871250
+      - 7c-78-b2-87-12-50
+    and normalize to: 7C78B2871250
+    """
+    if not value:
+        return ""
+    cleaned = "".join(ch for ch in value if ch.isalnum())
+    return cleaned.upper()
 
 
 @token_exception_handler
@@ -51,31 +76,23 @@ async def async_setup_entry(
     """
     Set up Wyze binary sensors.
 
-    IMPORTANT:
-    - We do NOT register per-camera update workers for motion anymore (API-heavy).
-    - We optionally add ONE camera motion-event binary sensor using a slow poll coordinator.
+    - Physical sensors (PIR/contact): register for updates.
+    - Optional: ONE camera motion-event binary sensor using Wyze cloud event_list.
     """
 
     _LOGGER.debug("Creating new WyzeApi binary sensor component")
 
     client: Wyzeapy = hass.data[DOMAIN][config_entry.entry_id][CONF_CLIENT]
-
-    _LOGGER.debug(
-        "Wyzeapy event-ish attrs: %s",
-        sorted([a for a in dir(client) if "event" in a.lower()])
-    )
-
     sensor_service: SensorService = await client.sensor_service
-    camera_service: CameraService = await client.camera_service
 
-    # Physical Wyze sensors (PIR/contact) - these are fine to register for updates.
+    # Physical Wyze sensors (PIR/contact) - safe to register for updates
     sensors = [
         WyzeSensor(sensor_service, sensor)
         for sensor in await sensor_service.get_sensors()
     ]
     async_add_entities(sensors, True)
 
-    # OPTIONAL: One camera motion-event sensor using a polling coordinator (low-impact)
+    # Optional: ONE camera motion sensor based on cloud events
     options = config_entry.options
     enable = options.get(CONF_ENABLE_CAMERA_MOTION, False)
     camera_mac = options.get(CONF_MOTION_CAMERA_MAC)
@@ -83,42 +100,47 @@ async def async_setup_entry(
     if enable and camera_mac:
         interval_s = int(options.get(CONF_MOTION_POLL_INTERVAL, 90))
         hold_s = int(options.get(CONF_MOTION_HOLD_SECONDS, 15))
-    
-        # Build an events-capable API client
-        wyze_events_api = WyzeEventsApi.from_config_entry(hass, config_entry)
-    
+
+        device_id = _normalize_device_id(camera_mac)
+        if not device_id:
+            _LOGGER.warning("Camera motion enabled but MAC/device_id is empty")
+            return
+
+        api = WyzeCloudEventsApi.from_config_entry(hass, config_entry)
+
         motion_coord = WyzeMotionEventsCoordinator(
             hass=hass,
-            wyze_events_api=wyze_events_api,
-            target_device_id_or_mac=camera_mac,
+            api=api,
+            target_device_id=device_id,
             interval_s=interval_s,
         )
         await motion_coord.async_config_entry_first_refresh()
-    
+
         async_add_entities(
-            [WyzeCameraMotionEventBinarySensor(motion_coord, camera_mac, hold_s)],
+            [WyzeCameraMotionEventBinarySensor(motion_coord, device_id, hold_s)],
             True,
         )
 
 
 class WyzeSensor(BinarySensorEntity):
-    """A representation of the Wyze (hardware) Sensor for use in Home Assistant."""
+    """A representation of a Wyze physical sensor for Home Assistant."""
 
     def __init__(self, sensor_service: SensorService, sensor: Sensor):
         self._sensor_service = sensor_service
         self._sensor = sensor
 
     async def async_added_to_hass(self) -> None:
-        """Registers for updates when the entity is added to Home Assistant."""
-        await self._sensor_service.register_for_updates(self._sensor, self.process_update)
+        await self._sensor_service.register_for_updates(
+            self._sensor, self.process_update
+        )
 
     async def async_will_remove_from_hass(self) -> None:
         await self._sensor_service.deregister_for_updates(self._sensor)
 
     def process_update(self, sensor: Sensor):
-        """Process an update for the Wyze Sensor."""
         self._sensor = sensor
-        self.schedule_update_ha_state()
+        # Thread-safe: bounce onto HA loop
+        self.hass.loop.call_soon_threadsafe(self.async_schedule_update_ha_state)
 
     @property
     def device_info(self):
@@ -131,7 +153,7 @@ class WyzeSensor(BinarySensorEntity):
 
     @property
     def available(self) -> bool:
-        return bool(self.coordinator.data.get("found"))
+        return True
 
     @property
     def name(self):
@@ -143,13 +165,11 @@ class WyzeSensor(BinarySensorEntity):
 
     @property
     def is_on(self):
-        """Return true if sensor detects motion/contact."""
         return self._sensor.detected
 
     @property
     def unique_id(self):
-        # Avoid collisions with camera motion sensors
-        return f"{self._sensor.mac}-sensor"
+        return f"{self._sensor.mac}-binary"
 
     @property
     def extra_state_attributes(self):
@@ -165,31 +185,35 @@ class WyzeSensor(BinarySensorEntity):
             return BinarySensorDeviceClass.MOTION
         if self._sensor.type is DeviceTypes.CONTACT_SENSOR:
             return BinarySensorDeviceClass.DOOR
-        raise RuntimeError(f"The device type {self._sensor.type} is not supported by this class")
+        raise RuntimeError(f"Unsupported sensor type: {self._sensor.type}")
 
 
 class WyzeCameraMotionEventBinarySensor(CoordinatorEntity, BinarySensorEntity):
     """
-    A low-impact motion binary sensor for ONE camera, driven by polling camera metadata
-    (e.g., last_event_ts) via WyzeCameraMotionCoordinator.
+    Motion binary sensor for ONE camera using Wyze cloud event list.
+
+    Coordinator data must include:
+      - found: bool
+      - last_event_ts: int|None  (ms since epoch)
+      - (optional) nickname/product_model if you want richer device info
     """
 
     _attr_device_class = BinarySensorDeviceClass.MOTION
 
     def __init__(
         self,
-        coordinator: WyzeCameraMotionCoordinator,
-        camera_mac: str,
+        coordinator: WyzeMotionEventsCoordinator,
+        device_id: str,
         hold_seconds: int,
     ):
         super().__init__(coordinator)
-        self._camera_mac = (camera_mac or "").lower()
+        self._device_id = _normalize_device_id(device_id)
         self._hold = timedelta(seconds=int(hold_seconds))
         self._last_seen_event: Optional[int] = None
         self._unsub_off = None
 
-        self._attr_unique_id = f"{self._camera_mac}-motion-event"
-        self._attr_name = f"Wyze {self._camera_mac} Motion"
+        self._attr_unique_id = f"{self._device_id}-motion-event"
+        self._attr_name = f"Wyze {self._device_id} Motion"
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
@@ -203,11 +227,13 @@ class WyzeCameraMotionEventBinarySensor(CoordinatorEntity, BinarySensorEntity):
 
     @property
     def device_info(self):
-        # Attach to the camera device record in HA by MAC
+        # Attach to the HA device record by identifier (DOMAIN, device_id)
+        # If you want this to attach to the existing camera device (which may be MAC-with-colons),
+        # we can adjust identifiers once we confirm which identifier your integration uses.
         nickname = self.coordinator.data.get("nickname") or self._attr_name
         model = self.coordinator.data.get("product_model")
         return {
-            "identifiers": {(DOMAIN, self._camera_mac)},
+            "identifiers": {(DOMAIN, self._device_id)},
             "name": nickname,
             "manufacturer": "WyzeLabs",
             "model": model,
@@ -225,7 +251,7 @@ class WyzeCameraMotionEventBinarySensor(CoordinatorEntity, BinarySensorEntity):
         def _cb(_now):
             # Ensure we run on the HA event loop thread
             self.hass.loop.call_soon_threadsafe(self.async_schedule_update_ha_state)
-    
+
         self._unsub_off = async_call_later(
             self.hass,
             self._hold.total_seconds(),
@@ -243,6 +269,7 @@ class WyzeCameraMotionEventBinarySensor(CoordinatorEntity, BinarySensorEntity):
             self._last_seen_event = ts
             self._schedule_turn_off()
 
+        # last_event_ts is ms since epoch
         try:
             event_dt = dt_util.utc_from_timestamp(self._last_seen_event / 1000.0)
         except Exception:
@@ -254,86 +281,9 @@ class WyzeCameraMotionEventBinarySensor(CoordinatorEntity, BinarySensorEntity):
     def extra_state_attributes(self):
         attrs = {
             ATTR_ATTRIBUTION: ATTRIBUTION,
-            "camera_mac": self._camera_mac,
-            "hold_seconds": int(self._hold.total_seconds()),
+            "device_id": self._device_id,
         }
-        last_ts = self.coordinator.data.get("last_event_ts")
-        if last_ts:
-            attrs["last_event_ts"] = last_ts
+        eid = self.coordinator.data.get("event_id")
+        if eid:
+            attrs["event_id"] = eid
         return attrs
-
-
-# NOTE:
-# We intentionally removed/disabled the old WyzeCameraMotion entity from setup to avoid
-# per-camera register_for_updates workers (API-heavy). If you keep the class for reference,
-# do not instantiate it for all cameras.
-#
-# If you want it for debugging, only create ONE instance behind an option and for a single MAC.
-class WyzeCameraMotion(BinarySensorEntity):
-    """Legacy API-heavy camera motion sensor (do not enable broadly)."""
-
-    _is_on = False
-    _last_event = time.time() * 1000
-
-    def __init__(self, camera_service: CameraService, camera: Camera):
-        self._camera_service = camera_service
-        self._camera = camera
-
-    @property
-    def device_info(self):
-        return {
-            "identifiers": {(DOMAIN, self._camera.mac)},
-            "name": self.name,
-            "manufacturer": "WyzeLabs",
-            "model": self._camera.product_model,
-        }
-
-    @property
-    def available(self) -> bool:
-        return self._camera.available
-
-    @property
-    def name(self):
-        return self._camera.nickname
-
-    @property
-    def should_poll(self) -> bool:
-        return False
-
-    @property
-    def is_on(self):
-        return self._is_on
-
-    @property
-    def unique_id(self):
-        return f"{self._camera.mac}-camera_motion_legacy"
-
-    @property
-    def extra_state_attributes(self):
-        return {
-            ATTR_ATTRIBUTION: ATTRIBUTION,
-            "device model": self._camera.product_model,
-            "mac": self._camera.mac,
-        }
-
-    @property
-    def device_class(self):
-        return BinarySensorDeviceClass.MOTION
-
-    async def async_added_to_hass(self) -> None:
-        await self._camera_service.register_for_updates(self._camera, self.process_update)
-
-    async def async_will_remove_from_hass(self) -> None:
-        await self._camera_service.deregister_for_updates(self._camera)
-
-    def process_update(self, camera: Camera) -> None:
-        self._camera = camera
-
-        if camera.last_event_ts > self._last_event:
-            self._is_on = True
-            self._last_event = camera.last_event_ts
-        else:
-            self._is_on = False
-            self._last_event = camera.last_event_ts
-
-        self.schedule_update_ha_state()
