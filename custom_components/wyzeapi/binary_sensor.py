@@ -57,6 +57,11 @@ async def async_setup_entry(
 
     client: Wyzeapy = hass.data[DOMAIN][config_entry.entry_id][CONF_CLIENT]
 
+    _LOGGER.debug(
+        "Wyzeapy event-ish attrs: %s",
+        sorted([a for a in dir(client) if "event" in a.lower()])
+    )
+
     sensor_service: SensorService = await client.sensor_service
     camera_service: CameraService = await client.camera_service
 
