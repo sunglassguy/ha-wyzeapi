@@ -64,5 +64,6 @@ class WyzeMotionEventsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "raw": newest_event,
         }
         _LOGGER.debug("Coordinator return payload: %s", payload)
+        _LOGGER.debug("Polling events for device_id=%s", self._target)
 
         return payload
