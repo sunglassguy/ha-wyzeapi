@@ -262,11 +262,11 @@ class WyzeCloudEventsApi:
         async with self._session.post(device_url, data=payload, headers=headers) as resp:
             return await _validate_resp(resp)
 
-    async def get_events(self, device_ids: Optional[list[str]] = None, last_ts_s: int = 0) -> Tuple[float, List[Dict[str, Any]]]:
-        """
-        Return (check_time, event_list). last_ts_s is seconds.
-        Mirrors docker-wyze-bridge logic.
-        """
+    async def get_events(
+        self,
+        device_ids: Optional[list[str]] = None,
+        last_ts_s: int = 0,
+    ) -> List[Dict[str, Any]]:
         current_ms = int(time.time() + 60) * 1000
         params = {
             "count": 20,
@@ -278,20 +278,21 @@ class WyzeCloudEventsApi:
             "event_value_list": [],
             "event_tag_list": [],
         }
-
+    
         try:
             resp = await self.post_device_v4("get_event_list", params)
-            return time.time(), resp.get("event_list", [])
+            return resp.get("event_list", []) or []
+    
         except AccessTokenError:
-            # Refresh/login once, then retry
             if await self._refresh() or await self._login():
                 resp = await self.post_device_v4("get_event_list", params)
-                return time.time(), resp.get("event_list", [])
-            return time.time() + 60, []
+                return resp.get("event_list", []) or []
+            return []
+    
         except RateLimitError as ex:
             _LOGGER.warning("Wyze events rate-limited; cooling down until %s", ex.reset_by)
-            return float(ex.reset_by), []
+            return []
+    
         except (ClientResponseError, WyzeAPIError, Exception) as ex:
             _LOGGER.warning("Wyze events error: %s", ex)
-            return time.time() + 60, []
-
+            return []
