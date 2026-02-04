@@ -212,6 +212,17 @@ class WyzeCameraMotionEventBinarySensor(CoordinatorEntity, BinarySensorEntity):
     @property
     def available(self) -> bool:
         return self.coordinator.last_update_success
+      
+    def _handle_coordinator_update(self) -> None:
+        # 🔍 DEBUG: proves entity is receiving coordinator updates
+        _LOGGER.debug(
+            "Binary sensor update: last_event_ts=%s event_id=%s",
+            self.coordinator.data.get("last_event_ts"),
+            self.coordinator.data.get("event_id"),
+        )
+
+        # This schedules the entity state to be recalculated
+        self.async_schedule_update_ha_state()
 
     @property
     def device_info(self):
