@@ -245,19 +245,19 @@ class WyzeCameraMotionEventBinarySensor(CoordinatorEntity, BinarySensorEntity):
         return bool(self.coordinator.data.get("found"))
 
     def _schedule_turn_off(self) -> None:
-        if self._unsub_off:
-            self._unsub_off()
-            self._unsub_off = None
-
-        def _cb(_now):
-            # Ensure we run on the HA event loop thread
-            self.hass.loop.call_soon_threadsafe(self.async_schedule_update_ha_state)
-
-        self._unsub_off = async_call_later(
-            self.hass,
-            self._hold.total_seconds(),
-            _cb,
-        )
+      if self._unsub_off:
+          self._unsub_off()
+          self._unsub_off = None
+  
+      def _cb(_now):
+          # async_call_later callback runs in event loop; schedule an update safely
+          self.async_schedule_update_ha_state()
+  
+      self._unsub_off = async_call_later(
+          self.hass,
+          self._hold.total_seconds(),
+          _cb,
+      )
 
     @property
     def is_on(self) -> bool:
