@@ -190,101 +190,71 @@ class WyzeSensor(BinarySensorEntity):
 
 
 class WyzeCameraMotionEventBinarySensor(CoordinatorEntity, BinarySensorEntity):
-    """
-    Motion binary sensor for ONE camera using Wyze cloud event list.
-
-    Coordinator data must include:
-      - found: bool
-      - last_event_ts: int|None  (ms since epoch)
-      - (optional) nickname/product_model if you want richer device info
-    """
+    """Binary motion sensor driven by Wyze cloud events via coordinator."""
 
     _attr_device_class = BinarySensorDeviceClass.MOTION
 
     def __init__(
         self,
         coordinator: WyzeMotionEventsCoordinator,
-        device_id: str,
+        camera_device_id: str,
         hold_seconds: int,
     ):
         super().__init__(coordinator)
-        self._device_id = _normalize_device_id(device_id)
+        self._device_id = (camera_device_id or "").replace(":", "").replace("-", "").upper()
         self._hold = timedelta(seconds=int(hold_seconds))
-        self._last_seen_event: Optional[int] = None
+        self._last_seen_event_ms: Optional[int] = None
         self._unsub_off = None
 
         self._attr_unique_id = f"{self._device_id}-motion-event"
         self._attr_name = f"Wyze {self._device_id} Motion"
 
-    async def async_added_to_hass(self) -> None:
-        await super().async_added_to_hass()
-        self._unsub_off = None
+    @property
+    def available(self) -> bool:
+        return self.coordinator.last_update_success
+
+    @property
+    def device_info(self):
+        return {
+            "identifiers": {(DOMAIN, self._device_id)},
+            "name": self._attr_name,
+            "manufacturer": "WyzeLabs",
+        }
+
+    def _schedule_turn_off(self) -> None:
+        if self._unsub_off:
+            self._unsub_off()
+            self._unsub_off = None
+
+        def _cb(_now):
+            self.async_schedule_update_ha_state()
+
+        self._unsub_off = async_call_later(
+            self.hass,
+            self._hold.total_seconds(),
+            _cb,
+        )
+
+    @property
+    def is_on(self) -> bool:
+        ts_ms = self.coordinator.data.get("last_event_ts")
+        if not ts_ms:
+            return False
+
+        # Track newest event and ensure we schedule an update when hold expires
+        if self._last_seen_event_ms is None or ts_ms > self._last_seen_event_ms:
+            self._last_seen_event_ms = ts_ms
+            self._schedule_turn_off()
+
+        try:
+            event_dt = dt_util.utc_from_timestamp(self._last_seen_event_ms / 1000.0)
+        except Exception:
+            return False
+
+        return (dt_util.utcnow() - event_dt) <= self._hold
 
     async def async_will_remove_from_hass(self) -> None:
         if self._unsub_off:
             self._unsub_off()
             self._unsub_off = None
         await super().async_will_remove_from_hass()
-
-    @property
-    def device_info(self):
-        # Attach to the HA device record by identifier (DOMAIN, device_id)
-        # If you want this to attach to the existing camera device (which may be MAC-with-colons),
-        # we can adjust identifiers once we confirm which identifier your integration uses.
-        nickname = self.coordinator.data.get("nickname") or self._attr_name
-        model = self.coordinator.data.get("product_model")
-        return {
-            "identifiers": {(DOMAIN, self._device_id)},
-            "name": nickname,
-            "manufacturer": "WyzeLabs",
-            "model": model,
-        }
-
-    @property
-    def available(self) -> bool:
-        return bool(self.coordinator.data.get("found"))
-
-    def _schedule_turn_off(self) -> None:
-      if self._unsub_off:
-          self._unsub_off()
-          self._unsub_off = None
-  
-      def _cb(_now):
-          # async_call_later callback runs in event loop; schedule an update safely
-          self.async_schedule_update_ha_state()
-  
-      self._unsub_off = async_call_later(
-          self.hass,
-          self._hold.total_seconds(),
-          _cb,
-      )
-
-    @property
-    def is_on(self) -> bool:
-        ts = self.coordinator.data.get("last_event_ts")
-        if not ts:
-            return False
-
-        # Track newest event and schedule a state refresh when hold expires
-        if self._last_seen_event is None or ts > self._last_seen_event:
-            self._last_seen_event = ts
-            self._schedule_turn_off()
-
-        # last_event_ts is ms since epoch
-        try:
-            event_dt = dt_util.utc_from_timestamp(self._last_seen_event / 1000.0)
-        except Exception:
-            return False
-
-        return (dt_util.utcnow() - event_dt) <= self._hold
-
-    @property
-    def extra_state_attributes(self):
-        attrs = {
-            ATTR_ATTRIBUTION: ATTRIBUTION,
-            "device_id": self._device_id,
-        }
-        eid = self.coordinator.data.get("event_id")
-        if eid:
-            attrs["event_id"] = eid
-        return attrs
