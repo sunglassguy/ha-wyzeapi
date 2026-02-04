@@ -238,7 +238,7 @@ class WyzeCameraMotionEventBinarySensor(CoordinatorEntity, BinarySensorEntity):
             self._unsub_off = None
 
         def _cb(_now):
-            self.async_schedule_update_ha_state()
+            self.hass.loop.call_soon_threadsafe(self.async_write_ha_state)
 
         self._unsub_off = async_call_later(
             self.hass,
