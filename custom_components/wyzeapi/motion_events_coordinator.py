@@ -49,9 +49,20 @@ class WyzeMotionEventsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         self._last_ts_s = newest_ts_s
 
-        return {
+        _LOGGER.debug(
+            "Motion events data: target=%s last_ts_s=%s events=%d newest_ms=%s event_id=%s",
+            self._target,
+            self._last_ts_s,
+            len(events or []),
+            (newest_ts_s * 1000) if newest_ts_s else None,
+            newest_event.get("event_id") if newest_event else None,
+        )
+        payload = {
             "found": True,
             "last_event_ts": (newest_ts_s * 1000) if newest_ts_s else None,
             "event_id": newest_event.get("event_id") if newest_event else None,
             "raw": newest_event,
         }
+        _LOGGER.debug("Coordinator return payload: %s", payload)
+
+        return payload
