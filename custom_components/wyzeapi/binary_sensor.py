@@ -25,6 +25,9 @@ from wyzeapy.types import DeviceTypes
 
 from .token_manager import token_exception_handler
 from .motion_coordinator import WyzeCameraMotionCoordinator
+from .motion_events_coordinator import WyzeMotionEventsCoordinator
+from .wyze_events_api import WyzeEventsApi
+
 from .const import (
     DOMAIN,
     CONF_CLIENT,
@@ -80,15 +83,18 @@ async def async_setup_entry(
     if enable and camera_mac:
         interval_s = int(options.get(CONF_MOTION_POLL_INTERVAL, 90))
         hold_s = int(options.get(CONF_MOTION_HOLD_SECONDS, 15))
-
-        motion_coord = WyzeCameraMotionCoordinator(
+    
+        # Build an events-capable API client
+        wyze_events_api = WyzeEventsApi.from_config_entry(hass, config_entry)
+    
+        motion_coord = WyzeMotionEventsCoordinator(
             hass=hass,
-            camera_service=camera_service,
-            camera_mac=camera_mac,
+            wyze_events_api=wyze_events_api,
+            target_device_id_or_mac=camera_mac,
             interval_s=interval_s,
         )
         await motion_coord.async_config_entry_first_refresh()
-
+    
         async_add_entities(
             [WyzeCameraMotionEventBinarySensor(motion_coord, camera_mac, hold_s)],
             True,
