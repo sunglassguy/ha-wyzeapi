@@ -209,7 +209,7 @@ class WyzeCameraMotionEventBinarySensor(CoordinatorEntity, BinarySensorEntity):
 
     @property
     def available(self) -> bool:
-        return bool(self.coordinator.data.get("found")) and bool(self.coordinator.data.get("available", True))
+        return bool(self.coordinator.data.get("found"))
 
     def _schedule_turn_off(self) -> None:
         # Ensure we go OFF after hold_seconds even if no new poll occurs
