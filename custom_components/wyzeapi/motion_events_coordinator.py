@@ -1,18 +1,37 @@
 from __future__ import annotations
 
 import logging
-from collections import deque
+import time
 from datetime import timedelta
-from typing import Any, Deque, Optional
+from typing import Any, Optional
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+
+from .wyze_cloud_events import WyzeCloudEventsApi
 
 _LOGGER = logging.getLogger(__name__)
 
 
 class WyzeMotionEventsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
-    def __init__(self, hass: HomeAssistant, api, target_device_id: str, interval_s: int):
+    """
+    Poll Wyze cloud event list (v4 get_event_list) for ONE device_id (camera MAC without colons),
+    mirroring docker-wyze-bridge behavior.
+
+    coordinator.data payload:
+      - found: bool (polling is working)
+      - last_event_ts: Optional[int]  (ms since epoch from Wyze event_ts)
+      - event_id: Optional[str]
+      - raw: Optional[dict]
+    """
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        api: WyzeCloudEventsApi,
+        target_device_id: str,
+        interval_s: int,
+    ):
         super().__init__(
             hass,
             _LOGGER,
@@ -21,49 +40,55 @@ class WyzeMotionEventsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         self._api = api
         self._target = target_device_id
-        self._seen: Deque[str] = deque(maxlen=50)
+        # IMPORTANT: start at 0 so we don't accidentally "skip past" events
         self._last_ts_s: int = 0
 
     async def _async_update_data(self) -> dict[str, Any]:
+        start = time.perf_counter()
+        _LOGGER.debug("Polling events for device_id=%s", self._target)
+
         try:
-            _, events = await self._api.get_events([self._target], self._last_ts_s)
+            # returns a list of events (possibly empty)
+            events = await self._api.get_events([self._target], self._last_ts_s)
         except Exception as err:
-            raise UpdateFailed(f"Failed fetching Wyze events: {err}") from err
+            raise UpdateFailed(f"Failed fetching Wyze motion events: {err}") from err
+        finally:
+            elapsed = time.perf_counter() - start
+            _LOGGER.debug(
+                "Finished fetching Wyze motion events data in %.3f seconds (success: %s)",
+                elapsed,
+                True,
+            )
 
-        newest_ts_s = self._last_ts_s
         newest_event: Optional[dict[str, Any]] = None
+        newest_ts_s: Optional[int] = None
 
-        for ev in events or []:
-            ev_id = ev.get("event_id")
-            if ev_id and ev_id in self._seen:
-                continue
-            if ev_id:
-                self._seen.append(ev_id)
+        if events:
+            # Pick newest by event_ts (ms)
+            newest_event = max(events, key=lambda e: int(e.get("event_ts", 0) or 0))
+            newest_ts_ms = int(newest_event.get("event_ts", 0) or 0)
+            newest_ts_s = newest_ts_ms // 1000
 
-            ev_ts_ms = ev.get("event_ts")
-            if isinstance(ev_ts_ms, (int, float)) and ev_ts_ms > 0:
-                ts_s = int(ev_ts_ms / 1000)
-                if ts_s > newest_ts_s:
-                    newest_ts_s = ts_s
-                    newest_event = ev
+            # Only advance the cursor when we actually saw an event
+            if newest_ts_s > self._last_ts_s:
+                self._last_ts_s = newest_ts_s
 
-        self._last_ts_s = newest_ts_s
-
-        _LOGGER.debug(
-            "Motion events data: target=%s last_ts_s=%s events=%d newest_ms=%s event_id=%s",
-            self._target,
-            self._last_ts_s,
-            len(events or []),
-            (newest_ts_s * 1000) if newest_ts_s else None,
-            newest_event.get("event_id") if newest_event else None,
-        )
         payload = {
             "found": True,
-            "last_event_ts": (newest_ts_s * 1000) if newest_ts_s else None,
+            # Only set last_event_ts if there was an actual event
+            "last_event_ts": int(newest_event["event_ts"]) if newest_event else None,
             "event_id": newest_event.get("event_id") if newest_event else None,
             "raw": newest_event,
         }
+
+        _LOGGER.debug(
+            "Motion events data: target=%s last_ts_s=%s events=%d last_event_ts=%s event_id=%s",
+            self._target,
+            self._last_ts_s,
+            len(events),
+            payload["last_event_ts"],
+            payload["event_id"],
+        )
         _LOGGER.debug("Coordinator return payload: %s", payload)
-        _LOGGER.debug("Polling events for device_id=%s", self._target)
 
         return payload
