@@ -153,12 +153,8 @@ class WyzeSensor(BinarySensorEntity):
 
     @property
     def available(self) -> bool:
-        # CoordinatorEntity sets self.coordinator.last_update_success
-        if not self.coordinator.last_update_success:
-            return False
-        # If we have *any* data dict, treat it as available
-        return isinstance(self.coordinator.data, dict)
-
+        # Available if the coordinator is successfully updating
+        return self.coordinator.last_update_success
 
     @property
     def name(self):
