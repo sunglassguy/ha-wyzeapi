@@ -33,7 +33,8 @@ from .const import (
     LIGHT_UPDATED,
     WYZE_CAMERA_EVENT,
     WYZE_NOTIFICATION_TOGGLE,
-    CONF_MOTION_TRACKING_DEVICE_IDS,
+    CONF_ENABLE_CAMERA_MOTION,          # ✅ add this
+    CONF_MOTION_TRACKING_DEVICES,       # ✅ and/or whatever you actually use below
 )
 
 from .token_manager import token_exception_handler
