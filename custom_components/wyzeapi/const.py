@@ -33,3 +33,5 @@ CONF_MOTION_POLL_INTERVAL = "motion_poll_interval"
 CONF_MOTION_HOLD_SECONDS = "motion_hold_seconds"
 CONF_MOTION_TRACKING_DEVICES = "motion_tracking_devices"  # list[str] of device_ids
 
+# Backwards / compatibility alias (IMPORTANT)
+CONF_MOTION_TRACKING_DEVICE_IDS = CONF_MOTION_TRACKING_DEVICES
