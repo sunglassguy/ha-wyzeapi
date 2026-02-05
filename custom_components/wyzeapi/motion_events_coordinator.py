@@ -8,22 +8,36 @@ from typing import Any, Optional
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .const import DOMAIN  # <-- add this
+from .const import DOMAIN, CONF_ENABLE_CAMERA_MOTION
 from .wyze_cloud_events import WyzeCloudEventsApi
 
 _LOGGER = logging.getLogger(__name__)
 
 
 class WyzeMotionEventsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
-    """Poll Wyze cloud event list for ONE device_id."""
+    """
+    Poll Wyze cloud event list for ALL enabled device_ids.
+
+    coordinator.data payload:
+      {
+        "found": True,
+        "devices": {
+            "<DEVICE_ID>": {
+                "last_event_ts": Optional[int],  # ms
+                "event_id": Optional[str],
+                "raw": Optional[dict],
+            },
+            ...
+        }
+      }
+    """
 
     def __init__(
         self,
         hass: HomeAssistant,
         api: WyzeCloudEventsApi,
-        target_device_id: str,
+        config_entry_id: str,
         interval_s: int,
-        entry_id: str,  # <-- add this
     ):
         super().__init__(
             hass,
@@ -32,37 +46,47 @@ class WyzeMotionEventsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             update_interval=timedelta(seconds=int(interval_s)),
         )
         self._api = api
-        self._target = (target_device_id or "").upper()
+        self._entry_id = config_entry_id
+
+        # bridge-style global last_ts (seconds)
         self._last_ts_s: int = 0
-        self._entry_id = entry_id  # <-- store it
+
+    def _enabled_ids(self) -> set[str]:
+        entry = self.hass.data.get(DOMAIN, {}).get(self._entry_id, {})
+        enabled = entry.get("motion_tracking_enabled") or set()
+        return {str(x).upper() for x in enabled if str(x).strip()}
 
     async def _async_update_data(self) -> dict[str, Any]:
         start = time.perf_counter()
-        _LOGGER.debug("Polling events for device_id=%s", self._target)
+
+        entry = self.hass.data[DOMAIN][self._entry_id]
+        config_entry = self.hass.config_entries.async_get_entry(self._entry_id)
+        opts = config_entry.options if config_entry else {}
+
+        # master enable gate
+        if not opts.get(CONF_ENABLE_CAMERA_MOTION, False):
+            return {"found": True, "devices": {}}
+
+        enabled_ids = sorted(self._enabled_ids())
+        if not enabled_ids:
+            _LOGGER.debug("Motion events: no enabled cameras")
+            return {"found": True, "devices": {}}
+
+        _LOGGER.debug("Polling events for %d device_id(s)", len(enabled_ids))
 
         try:
-            # HA-only gating: if not enabled, do not hit the Wyze API.
-            enabled_ids = set(
-                self.hass.data.get(DOMAIN, {})
-                .get(self._entry_id, {})
-                .get("motion_tracking_enabled", set())
-            )
-            if self._target not in enabled_ids:
-                _LOGGER.debug("Motion tracking disabled for %s; skipping poll", self._target)
-                return {"found": True, "last_event_ts": None, "event_id": None, "raw": None}
+            result = await self._api.get_events(enabled_ids, self._last_ts_s)
 
-            result = await self._api.get_events([self._target], self._last_ts_s)
-
-            # Handle either (next_check, events) or events
+            # supports either events or (next_check, events)
             if isinstance(result, tuple) and len(result) == 2:
                 _next_check, events = result
             else:
                 events = result
 
-            if not events:
+            if events is None:
                 events = []
 
-            # defensive: dict-only
+            # defensive: only dict events
             events = [e for e in events if isinstance(e, dict)]
 
         except Exception as err:
@@ -70,32 +94,50 @@ class WyzeMotionEventsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         finally:
             elapsed = time.perf_counter() - start
             _LOGGER.debug(
-                "Finished fetching Wyze motion events data in %.3f seconds",
+                "Finished fetching Wyze motion events data in %.3f seconds (success: %s)",
                 elapsed,
+                True,
             )
 
-        newest_event: Optional[dict[str, Any]] = None
+        # Track newest per device
+        devices: dict[str, dict[str, Any]] = {}
 
-        if events:
-            newest_event = max(events, key=lambda e: int(e.get("event_ts", 0) or 0))
-            newest_ts_ms = int(newest_event.get("event_ts", 0) or 0)
-            newest_ts_s = newest_ts_ms // 1000
+        newest_ts_ms_seen: Optional[int] = None
+
+        for e in events:
+            dev = str(e.get("device_id") or "").upper()
+            if not dev:
+                continue
+            if dev not in enabled_ids:
+                continue
+
+            ts = int(e.get("event_ts", 0) or 0)
+            if ts <= 0:
+                continue
+
+            prev = devices.get(dev)
+            if prev is None or ts > int(prev.get("last_event_ts") or 0):
+                devices[dev] = {
+                    "last_event_ts": ts,
+                    "event_id": e.get("event_id"),
+                    "raw": e,
+                }
+
+            if newest_ts_ms_seen is None or ts > newest_ts_ms_seen:
+                newest_ts_ms_seen = ts
+
+        # Move global last_ts forward (bridge-style)
+        if newest_ts_ms_seen:
+            newest_ts_s = newest_ts_ms_seen // 1000
             if newest_ts_s > self._last_ts_s:
                 self._last_ts_s = newest_ts_s
 
-        payload = {
-            "found": True,
-            "last_event_ts": int(newest_event["event_ts"]) if newest_event else None,
-            "event_id": newest_event.get("event_id") if newest_event else None,
-            "raw": newest_event,
-        }
-
         _LOGGER.debug(
-            "Motion events data: target=%s last_ts_s=%s events=%d last_event_ts=%s event_id=%s",
-            self._target,
-            self._last_ts_s,
+            "Motion events: enabled=%d events=%d devices_with_events=%d last_ts_s=%d",
+            len(enabled_ids),
             len(events),
-            payload["last_event_ts"],
-            payload["event_id"],
+            len(devices),
+            self._last_ts_s,
         )
-        return payload
+
+        return {"found": True, "devices": devices}
