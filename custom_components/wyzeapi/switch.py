@@ -180,9 +180,8 @@ class WyzeNotifications(SwitchEntity):
             self.async_schedule_update_ha_state()
 
     @property
-    def available(self):
-        """Return the connection status of this switch."""
-        return True
+    def available(self) -> bool:
+        return self.hass.data[DOMAIN].get(self._entry.entry_id, {}).get(CONF_CLIENT) is not None
 
     @property
     def unique_id(self):
