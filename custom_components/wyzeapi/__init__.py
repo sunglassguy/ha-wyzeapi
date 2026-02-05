@@ -40,18 +40,19 @@ from .token_manager import TokenManager
 _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS = [
-    "light",
-    "switch",
-    "lock",
-    "climate",
-    "alarm_control_panel",
-    "sensor",
-    "binary_sensor",
-    "siren",
-    "cover",
-    "number",
-    "button",
-]  # Fixme: Re-add scene
+    "binary_sensor",  # For motion detection
+    "switch",         # For camera controls + motion tracking toggles
+    "sensor",         # For camera battery (if you have battery cams)
+    # Remove these if you don't need them:
+    # "light",
+    # "lock",
+    # "climate",
+    # "alarm_control_panel",
+    # "siren",
+    # "cover",
+    # "number",
+    # "button",
+]
 
 
 def _norm_mac(value: str) -> str:
