@@ -49,6 +49,10 @@ class WyzeMotionEventsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         start = time.perf_counter()
         _LOGGER.debug("Polling events for device_id=%s", self._target)
 
+        enabled_ids = set(self.hass.data[DOMAIN][self.config_entry_id]["motion_tracking_enabled"])
+        if self._target not in enabled_ids:
+            return {"found": True, "last_event_ts": None, "event_id": None, "raw": None}
+
         try:
             result = await self._api.get_events([self._target], self._last_ts_s)
 
