@@ -558,19 +558,18 @@ def _device_id_from_mac(mac: str) -> str:
 
 
 class WyzeCameraMotionTrackingSwitch(SwitchEntity):
-    """
-    HA-only toggle: whether we poll Wyze cloud *events* for motion for this camera.
+    """Enable/disable cloud-event motion tracking for a specific camera (HA-local toggle)."""
 
-    This does NOT change Wyze's own Motion Detection setting.
-    """
     _attr_should_poll = False
-    _attr_entity_category = EntityCategory.CONFIG
 
     def __init__(self, hass: HomeAssistant, config_entry: ConfigEntry, camera: Camera) -> None:
         self.hass = hass
         self._entry = config_entry
         self._camera = camera
-        self._device_id = _device_id_from_mac(camera.mac)
+        self._device_id = (camera.mac or "").replace(":", "").replace("-", "").upper()
+
+        self._attr_name = f"{camera.nickname} Motion Tracking (Cloud)"
+        self._attr_unique_id = f"{self._device_id}-motion-tracking-cloud"
 
     @property
     def device_info(self):
@@ -581,53 +580,56 @@ class WyzeCameraMotionTrackingSwitch(SwitchEntity):
             "model": self._camera.product_model,
         }
 
-    @property
-    def name(self):
-        return f"{self._camera.nickname} Motion Tracking (HA)"
-
-    @property
-    def unique_id(self):
-        return f"{self._camera.mac}-motion_tracking_ha"
+    def _get_enabled_set(self) -> set[str]:
+        return self.hass.data[DOMAIN][self._entry.entry_id].setdefault(
+            "motion_tracking_enabled", set()
+        )
 
     @property
     def is_on(self) -> bool:
-        opts = self._entry.options or {}
-        enabled = set(opts.get(CONF_MOTION_TRACKING_DEVICE_IDS, []) or [])
-        return self._device_id in enabled
+        return self._device_id in self._get_enabled_set()
 
     @property
     def available(self) -> bool:
-        # This is an HA toggle; keep it available if the camera exists.
-        return True
+        # If master camera motion is off, make the toggles unavailable
+        return bool(self._entry.options.get(CONF_ENABLE_CAMERA_MOTION, False))
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        await self._set_enabled(True)
+        enabled = self._get_enabled_set()
+        enabled.add(self._device_id)
 
-    async def async_turn_off(self, **kwargs: Any) -> None:
-        await self._set_enabled(False)
-
-    async def _set_enabled(self, enabled: bool) -> None:
-        opts = dict(self._entry.options or {})
-        current = set(opts.get(CONF_MOTION_TRACKING_DEVICE_IDS, []) or [])
-
-        if enabled:
-            current.add(self._device_id)
-        else:
-            current.discard(self._device_id)
-
-        opts[CONF_MOTION_TRACKING_DEVICE_IDS] = sorted(current)
-
-        # Persist to config entry
+        # persist to options
+        opts = dict(self._entry.options)
+        lst = [str(x).upper() for x in (opts.get(CONF_MOTION_TRACKING_DEVICES) or [])]
+        if self._device_id not in lst:
+            lst.append(self._device_id)
+        opts[CONF_MOTION_TRACKING_DEVICES] = sorted(set(lst))
         self.hass.config_entries.async_update_entry(self._entry, options=opts)
 
-        # Mirror to hass.data for fast access (matches what we added in __init__.py)
-        entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
-        enabled_set = entry_data.get("motion_tracking_enabled")
-        if isinstance(enabled_set, set):
-            enabled_set.clear()
-            enabled_set.update(current)
+        # refresh coordinator if present
+        coord = self.hass.data[DOMAIN][self._entry.entry_id].get("motion_events_coordinator")
+        if coord:
+            await coord.async_request_refresh()
 
         self.async_write_ha_state()
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        enabled = self._get_enabled_set()
+        enabled.discard(self._device_id)
+
+        # persist to options
+        opts = dict(self._entry.options)
+        lst = [str(x).upper() for x in (opts.get(CONF_MOTION_TRACKING_DEVICES) or [])]
+        lst = [x for x in lst if x != self._device_id]
+        opts[CONF_MOTION_TRACKING_DEVICES] = sorted(set(lst))
+        self.hass.config_entries.async_update_entry(self._entry, options=opts)
+
+        coord = self.hass.data[DOMAIN][self._entry.entry_id].get("motion_events_coordinator")
+        if coord:
+            await coord.async_request_refresh()
+
+        self.async_write_ha_state()
+
 
 class WzyeLightstripSwitch(SwitchEntity):
     """Music Mode Switch for Wyze Light Strip."""
