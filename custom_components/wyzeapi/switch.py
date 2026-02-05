@@ -15,6 +15,7 @@ from wyzeapy.services.camera_service import Camera
 from wyzeapy.services.switch_service import Switch
 from wyzeapy.types import Device, DeviceTypes, Event
 
+from homeassistant.helpers.entity import EntityCategory
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
@@ -32,7 +33,9 @@ from .const import (
     LIGHT_UPDATED,
     WYZE_CAMERA_EVENT,
     WYZE_NOTIFICATION_TOGGLE,
+    CONF_MOTION_TRACKING_DEVICE_IDS,
 )
+
 from .token_manager import token_exception_handler
 
 _LOGGER = logging.getLogger(__name__)
@@ -102,9 +105,12 @@ async def async_setup_entry(
         if switch.product_model not in POWER_SWITCH_UNSUPPORTED:
             switches.append(WyzeSwitch(camera_service, switch))
 
-        # Motion toggle switch
+        # Motion toggle switch (Wyze motion detection)
         if switch.product_model not in MOTION_SWITCH_UNSUPPORTED:
             switches.append(WyzeCameraMotionSwitch(camera_service, switch))
+
+        # NEW: HA-only motion tracking toggle (cloud events polling)
+        switches.append(WyzeCameraMotionTrackingSwitch(hass, config_entry, switch))
 
     switches.append(WyzeNotifications(client))
 
@@ -546,6 +552,82 @@ class WyzeCameraMotionSwitch(SwitchEntity):
             )
         )
 
+def _device_id_from_mac(mac: str) -> str:
+    """Wyze cloud events 'device_id' uses MAC without separators."""
+    return (mac or "").replace(":", "").replace("-", "").upper()
+
+
+class WyzeCameraMotionTrackingSwitch(SwitchEntity):
+    """
+    HA-only toggle: whether we poll Wyze cloud *events* for motion for this camera.
+
+    This does NOT change Wyze's own Motion Detection setting.
+    """
+    _attr_should_poll = False
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(self, hass: HomeAssistant, config_entry: ConfigEntry, camera: Camera) -> None:
+        self.hass = hass
+        self._entry = config_entry
+        self._camera = camera
+        self._device_id = _device_id_from_mac(camera.mac)
+
+    @property
+    def device_info(self):
+        return {
+            "identifiers": {(DOMAIN, self._camera.mac)},
+            "name": self._camera.nickname,
+            "manufacturer": "WyzeLabs",
+            "model": self._camera.product_model,
+        }
+
+    @property
+    def name(self):
+        return f"{self._camera.nickname} Motion Tracking (HA)"
+
+    @property
+    def unique_id(self):
+        return f"{self._camera.mac}-motion_tracking_ha"
+
+    @property
+    def is_on(self) -> bool:
+        opts = self._entry.options or {}
+        enabled = set(opts.get(CONF_MOTION_TRACKING_DEVICE_IDS, []) or [])
+        return self._device_id in enabled
+
+    @property
+    def available(self) -> bool:
+        # This is an HA toggle; keep it available if the camera exists.
+        return True
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        await self._set_enabled(True)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        await self._set_enabled(False)
+
+    async def _set_enabled(self, enabled: bool) -> None:
+        opts = dict(self._entry.options or {})
+        current = set(opts.get(CONF_MOTION_TRACKING_DEVICE_IDS, []) or [])
+
+        if enabled:
+            current.add(self._device_id)
+        else:
+            current.discard(self._device_id)
+
+        opts[CONF_MOTION_TRACKING_DEVICE_IDS] = sorted(current)
+
+        # Persist to config entry
+        self.hass.config_entries.async_update_entry(self._entry, options=opts)
+
+        # Mirror to hass.data for fast access (matches what we added in __init__.py)
+        entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+        enabled_set = entry_data.get("motion_tracking_enabled")
+        if isinstance(enabled_set, set):
+            enabled_set.clear()
+            enabled_set.update(current)
+
+        self.async_write_ha_state()
 
 class WzyeLightstripSwitch(SwitchEntity):
     """Music Mode Switch for Wyze Light Strip."""
