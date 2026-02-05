@@ -182,7 +182,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 vol.Optional(
                     CONF_MOTION_POLL_INTERVAL,
                     default=int(opts.get(CONF_MOTION_POLL_INTERVAL, 90)),
-                ): vol.All(vol.Coerce(int), vol.Range(min=30, max=3600)),
+                ): vol.All(vol.Coerce(int), vol.Range(min=1, max=3600)),
 
                 # Global hold time
                 vol.Optional(
