@@ -31,5 +31,5 @@ CONF_ENABLE_CAMERA_MOTION = "enable_camera_motion"
 CONF_MOTION_CAMERA_MAC = "motion_camera_mac"
 CONF_MOTION_POLL_INTERVAL = "motion_poll_interval"
 CONF_MOTION_HOLD_SECONDS = "motion_hold_seconds"
-CONF_MOTION_TRACKING_DEVICES = "motion_tracking_devices"  # list[str] of device_ids
+CONF_MOTION_TRACKING_DEVICES_IDS = "motion_tracking_devices"  # list[str] of device_ids
 
