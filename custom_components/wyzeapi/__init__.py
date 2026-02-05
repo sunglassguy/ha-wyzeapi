@@ -16,6 +16,7 @@ from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.check_config import HomeAssistantConfig
 from homeassistant.components import bluetooth
+
 from wyzeapy import Wyzeapy
 from wyzeapy.exceptions import AccessTokenError
 from wyzeapy.wyze_auth_lib import Token
@@ -31,14 +32,13 @@ from .const import (
     DEFAULT_LOCAL_CONTROL,
     KEY_ID,
     API_KEY,
+    CONF_MOTION_TRACKING_DEVICES,  # ✅ NEW: persisted enabled camera list
 )
-
 from .coordinator import WyzeLockBoltCoordinator
 from .token_manager import TokenManager
 
 _LOGGER = logging.getLogger(__name__)
 
-# IMPORTANT: binary_sensor must be included
 PLATFORMS = [
     "light",
     "switch",
@@ -52,10 +52,6 @@ PLATFORMS = [
     "number",
     "button",
 ]  # Fixme: Re-add scene
-
-# ---- Motion tracking (per-camera) shared state keys ----
-DATA_MOTION_TRACKING_ENABLED = "motion_tracking_enabled"  # set[str] of device_ids
-DATA_MOTION_TRACKING_DEFAULT = "motion_tracking_default"  # bool default if switch not created yet
 
 
 def _norm_mac(value: str) -> str:
@@ -110,12 +106,6 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
     """Set up Wyze Home Assistant Integration from a config entry."""
 
     hass.data.setdefault(DOMAIN, {})
-    hass.data[DOMAIN].setdefault(config_entry.entry_id, {})
-
-    # Per-entry shared state for motion tracking switches/coordinators/binary sensors.
-    # We'll store camera "device_id"/MAC-without-colons (e.g. D03F274B131D) in this set.
-    hass.data[DOMAIN][config_entry.entry_id].setdefault(DATA_MOTION_TRACKING_ENABLED, set())
-    hass.data[DOMAIN][config_entry.entry_id].setdefault(DATA_MOTION_TRACKING_DEFAULT, False)
 
     key_id = config_entry.data.get(KEY_ID)
     api_key = config_entry.data.get(API_KEY)
@@ -149,20 +139,29 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
         )
         raise ConfigEntryAuthFailed("Unable to login, please re-login.") from None
 
-    hass.data[DOMAIN][config_entry.entry_id].update(
-        {
-            CONF_CLIENT: client,
-            "key_id": key_id,
-            "api_key": api_key,
-        }
-    )
+    # --- store client + shared integration state ---
+    hass.data[DOMAIN][config_entry.entry_id] = {
+        CONF_CLIENT: client,
+        "key_id": key_id,
+        "api_key": api_key,
+        # ✅ runtime set of enabled device_ids (upper, no separators)
+        "motion_tracking_enabled": set(),
+        # ✅ global coordinator placeholder (created by binary_sensor.py when needed)
+        "motion_events_coordinator": None,
+    }
 
     await setup_coordinators(hass, config_entry, client)
 
-    # IMPORTANT: preserve ALL options (do not wipe motion options)
+    # --- Preserve / set defaults for options (do NOT wipe existing options) ---
     options_dict = dict(config_entry.options)
     options_dict.setdefault(BULB_LOCAL_CONTROL, DEFAULT_LOCAL_CONTROL)
+    options_dict.setdefault(CONF_MOTION_TRACKING_DEVICES, [])
     hass.config_entries.async_update_entry(config_entry, options=options_dict)
+
+    # ✅ hydrate enabled set from persisted options list
+    enabled_list = options_dict.get(CONF_MOTION_TRACKING_DEVICES, []) or []
+    enabled_set = {str(x).upper() for x in enabled_list if str(x).strip()}
+    hass.data[DOMAIN][config_entry.entry_id]["motion_tracking_enabled"] = enabled_set
 
     # Load platforms
     await hass.config_entries.async_forward_entry_setups(config_entry, PLATFORMS)
@@ -179,7 +178,9 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
         normalized_macs.add(_norm_mac(hms_id))
 
     device_registry = dr.async_get(hass)
-    for device in dr.async_entries_for_config_entry(device_registry, config_entry.entry_id):
+    for device in dr.async_entries_for_config_entry(
+        device_registry, config_entry.entry_id
+    ):
         for identifier in device.identifiers:
             domain, mac = identifier
             if domain != DOMAIN:
@@ -206,7 +207,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
 
-async def setup_coordinators(hass: HomeAssistant, config_entry: ConfigEntry, client: Wyzeapy):
+async def setup_coordinators(
+    hass: HomeAssistant, config_entry: ConfigEntry, client: Wyzeapy
+):
     """Set up coordinators for Wyze devices that require Bluetooth."""
     if bluetooth.async_scanner_count(hass, connectable=True) == 0:
         _LOGGER.info(
@@ -217,6 +220,8 @@ async def setup_coordinators(hass: HomeAssistant, config_entry: ConfigEntry, cli
     lock_service = await client.lock_service
     for lock in await lock_service.get_locks():
         if lock.product_model == "YD_BT1":
-            coordinators = hass.data[DOMAIN][config_entry.entry_id].setdefault("coordinators", {})
+            coordinators = hass.data[DOMAIN][config_entry.entry_id].setdefault(
+                "coordinators", {}
+            )
             coordinators[lock.mac] = WyzeLockBoltCoordinator(hass, lock_service, lock)
             await coordinators[lock.mac].update_lock_info()
