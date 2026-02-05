@@ -32,6 +32,7 @@ from .const import (
     KEY_ID,
     API_KEY,
 )
+
 from .coordinator import WyzeLockBoltCoordinator
 from .token_manager import TokenManager
 
@@ -52,6 +53,10 @@ PLATFORMS = [
     "button",
 ]  # Fixme: Re-add scene
 
+# ---- Motion tracking (per-camera) shared state keys ----
+DATA_MOTION_TRACKING_ENABLED = "motion_tracking_enabled"  # set[str] of device_ids
+DATA_MOTION_TRACKING_DEFAULT = "motion_tracking_default"  # bool default if switch not created yet
+
 
 def _norm_mac(value: str) -> str:
     """Normalize MAC-like identifiers for comparison."""
@@ -63,7 +68,9 @@ async def async_setup(
 ):
     """Set up the WyzeApi domain."""
     if hass.config_entries.async_entries(DOMAIN):
-        _LOGGER.debug("Nothing to import from configuration.yaml, loading from Integrations")
+        _LOGGER.debug(
+            "Nothing to import from configuration.yaml, loading from Integrations"
+        )
         return True
 
     domainconfig = config.get(DOMAIN)
@@ -103,6 +110,12 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
     """Set up Wyze Home Assistant Integration from a config entry."""
 
     hass.data.setdefault(DOMAIN, {})
+    hass.data[DOMAIN].setdefault(config_entry.entry_id, {})
+
+    # Per-entry shared state for motion tracking switches/coordinators/binary sensors.
+    # We'll store camera "device_id"/MAC-without-colons (e.g. D03F274B131D) in this set.
+    hass.data[DOMAIN][config_entry.entry_id].setdefault(DATA_MOTION_TRACKING_ENABLED, set())
+    hass.data[DOMAIN][config_entry.entry_id].setdefault(DATA_MOTION_TRACKING_DEFAULT, False)
 
     key_id = config_entry.data.get(KEY_ID)
     api_key = config_entry.data.get(API_KEY)
@@ -136,11 +149,13 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
         )
         raise ConfigEntryAuthFailed("Unable to login, please re-login.") from None
 
-    hass.data[DOMAIN][config_entry.entry_id] = {
-        CONF_CLIENT: client,
-        "key_id": key_id,
-        "api_key": api_key,
-    }
+    hass.data[DOMAIN][config_entry.entry_id].update(
+        {
+            CONF_CLIENT: client,
+            "key_id": key_id,
+            "api_key": api_key,
+        }
+    )
 
     await setup_coordinators(hass, config_entry, client)
 
@@ -153,7 +168,6 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
     await hass.config_entries.async_forward_entry_setups(config_entry, PLATFORMS)
 
     # ---- Device registry cleanup (normalized MACs) ----
-
     mac_addresses = await client.unique_device_ids
     normalized_macs = {_norm_mac(m) for m in mac_addresses}
 
@@ -165,9 +179,7 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
         normalized_macs.add(_norm_mac(hms_id))
 
     device_registry = dr.async_get(hass)
-    for device in dr.async_entries_for_config_entry(
-        device_registry, config_entry.entry_id
-    ):
+    for device in dr.async_entries_for_config_entry(device_registry, config_entry.entry_id):
         for identifier in device.identifiers:
             domain, mac = identifier
             if domain != DOMAIN:
@@ -194,9 +206,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
 
-async def setup_coordinators(
-    hass: HomeAssistant, config_entry: ConfigEntry, client: Wyzeapy
-):
+async def setup_coordinators(hass: HomeAssistant, config_entry: ConfigEntry, client: Wyzeapy):
     """Set up coordinators for Wyze devices that require Bluetooth."""
     if bluetooth.async_scanner_count(hass, connectable=True) == 0:
         _LOGGER.info(
@@ -207,10 +217,6 @@ async def setup_coordinators(
     lock_service = await client.lock_service
     for lock in await lock_service.get_locks():
         if lock.product_model == "YD_BT1":
-            coordinators = hass.data[DOMAIN][config_entry.entry_id].setdefault(
-                "coordinators", {}
-            )
-            coordinators[lock.mac] = WyzeLockBoltCoordinator(
-                hass, lock_service, lock
-            )
+            coordinators = hass.data[DOMAIN][config_entry.entry_id].setdefault("coordinators", {})
+            coordinators[lock.mac] = WyzeLockBoltCoordinator(hass, lock_service, lock)
             await coordinators[lock.mac].update_lock_info()
