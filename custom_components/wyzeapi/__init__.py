@@ -38,7 +38,7 @@ _LOGGER = logging.getLogger(__name__)
 PLATFORMS = [
     "binary_sensor",  # Camera motion detection
     "switch",         # Camera controls + motion tracking toggles
-    "sensor",         # Camera battery sensors
+    # "sensor",         # Camera battery sensors
 ]
 
 
