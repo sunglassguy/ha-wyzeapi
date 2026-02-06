@@ -11,27 +11,12 @@ API_KEY = "api_key"
 
 WYZE_NOTIFICATION_TOGGLE = f"{DOMAIN}.wyze.notification.toggle"
 
-LOCK_UPDATED = f"{DOMAIN}.lock_updated"
+# Event dispatcher signals
 CAMERA_UPDATED = f"{DOMAIN}.camera_updated"
-LIGHT_UPDATED = f"{DOMAIN}.light_updated"
-COVER_UPDATED = f"{DOMAIN}.cover_updated"
-RESET_BUTTON_PRESSED = f"{DOMAIN}.reset_button_pressed"
-# EVENT NAMES
 WYZE_CAMERA_EVENT = "wyze_camera_event"
 
-BULB_LOCAL_CONTROL = "bulb_local_control"
-DEFAULT_LOCAL_CONTROL = True
-
-# Yunding (YD) is the provider for Wyze Lock Bolt
-YDBLE_LOCK_STATE_UUID = "00002220-0000-6b63-6f6c-2e6b636f6f6c"
-YDBLE_UART_RX_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
-YDBLE_UART_TX_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"
-
+# Motion detection config (KEEP THESE)
 CONF_ENABLE_CAMERA_MOTION = "enable_camera_motion"
-CONF_MOTION_CAMERA_MAC = "motion_camera_mac"
 CONF_MOTION_POLL_INTERVAL = "motion_poll_interval"
 CONF_MOTION_HOLD_SECONDS = "motion_hold_seconds"
-CONF_MOTION_TRACKING_DEVICES = "motion_tracking_devices"  # list[str] of device_ids
-
-# Backwards / compatibility alias (IMPORTANT)
-CONF_MOTION_TRACKING_DEVICE_IDS = CONF_MOTION_TRACKING_DEVICES
+CONF_MOTION_TRACKING_DEVICES = "motion_tracking_devices"
