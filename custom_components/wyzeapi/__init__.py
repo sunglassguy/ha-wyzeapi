@@ -15,7 +15,6 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.check_config import HomeAssistantConfig
-from homeassistant.components import bluetooth
 
 from wyzeapy import Wyzeapy
 from wyzeapy.exceptions import AccessTokenError
@@ -28,30 +27,18 @@ from .const import (
     REFRESH_TOKEN,
     REFRESH_TIME,
     WYZE_NOTIFICATION_TOGGLE,
-    BULB_LOCAL_CONTROL,
-    DEFAULT_LOCAL_CONTROL,
     KEY_ID,
     API_KEY,
-    CONF_MOTION_TRACKING_DEVICES,  # ✅ NEW: persisted enabled camera list
+    CONF_MOTION_TRACKING_DEVICES,
 )
-from .coordinator import WyzeLockBoltCoordinator
 from .token_manager import TokenManager
 
 _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS = [
-    "binary_sensor",  # For motion detection
-    "switch",         # For camera controls + motion tracking toggles
-    "sensor",         # For camera battery (if you have battery cams)
-    # Remove these if you don't need them:
-    # "light",
-    # "lock",
-    # "climate",
-    # "alarm_control_panel",
-    # "siren",
-    # "cover",
-    # "number",
-    # "button",
+    "binary_sensor",  # Camera motion detection
+    "switch",         # Camera controls + motion tracking toggles
+    "sensor",         # Camera battery sensors
 ]
 
 
@@ -140,26 +127,23 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
         )
         raise ConfigEntryAuthFailed("Unable to login, please re-login.") from None
 
-    # --- store client + shared integration state ---
+    # Store client + shared integration state
     hass.data[DOMAIN][config_entry.entry_id] = {
         CONF_CLIENT: client,
         "key_id": key_id,
         "api_key": api_key,
-        # ✅ runtime set of enabled device_ids (upper, no separators)
+        # Runtime set of enabled device_ids for motion tracking
         "motion_tracking_enabled": set(),
-        # ✅ global coordinator placeholder (created by binary_sensor.py when needed)
+        # Global coordinator placeholder (created by binary_sensor.py when needed)
         "motion_events_coordinator": None,
     }
 
-    await setup_coordinators(hass, config_entry, client)
-
-    # --- Preserve / set defaults for options (do NOT wipe existing options) ---
+    # Set defaults for options
     options_dict = dict(config_entry.options)
-    options_dict.setdefault(BULB_LOCAL_CONTROL, DEFAULT_LOCAL_CONTROL)
     options_dict.setdefault(CONF_MOTION_TRACKING_DEVICES, [])
     hass.config_entries.async_update_entry(config_entry, options=options_dict)
 
-    # ✅ hydrate enabled set from persisted options list
+    # Hydrate enabled set from persisted options list
     enabled_list = options_dict.get(CONF_MOTION_TRACKING_DEVICES, []) or []
     enabled_set = {str(x).upper() for x in enabled_list if str(x).strip()}
     hass.data[DOMAIN][config_entry.entry_id]["motion_tracking_enabled"] = enabled_set
@@ -167,12 +151,12 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
     # Load platforms
     await hass.config_entries.async_forward_entry_setups(config_entry, PLATFORMS)
 
-    # ---- Device registry cleanup (normalized MACs) ----
+    # Device registry cleanup (normalized MACs)
     mac_addresses = await client.unique_device_ids
     normalized_macs = {_norm_mac(m) for m in mac_addresses}
-
     normalized_macs.add(_norm_mac(WYZE_NOTIFICATION_TOGGLE))
 
+    # Add HMS ID if present (though you probably don't use it)
     hms_service = await client.hms_service
     hms_id = hms_service.hms_id
     if hms_id:
@@ -206,23 +190,3 @@ async def options_update_listener(hass: HomeAssistant, config_entry: ConfigEntry
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-
-
-async def setup_coordinators(
-    hass: HomeAssistant, config_entry: ConfigEntry, client: Wyzeapy
-):
-    """Set up coordinators for Wyze devices that require Bluetooth."""
-    if bluetooth.async_scanner_count(hass, connectable=True) == 0:
-        _LOGGER.info(
-            "Bluetooth is not active or no scanners available. Skipping WyzeLockBoltCoordinator setup."
-        )
-        return
-
-    lock_service = await client.lock_service
-    for lock in await lock_service.get_locks():
-        if lock.product_model == "YD_BT1":
-            coordinators = hass.data[DOMAIN][config_entry.entry_id].setdefault(
-                "coordinators", {}
-            )
-            coordinators[lock.mac] = WyzeLockBoltCoordinator(hass, lock_service, lock)
-            await coordinators[lock.mac].update_lock_info()
