@@ -513,8 +513,8 @@ class WyzeCameraMotionTrackingSwitch(SwitchEntity):
 
     @property
     def available(self) -> bool:
-        """Available only if master camera motion toggle is enabled."""
-        return bool(self._entry.options.get(CONF_ENABLE_CAMERA_MOTION, False))
+        """Always available - no master toggle required."""
+        return True
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Enable cloud motion tracking for this camera."""
@@ -527,6 +527,10 @@ class WyzeCameraMotionTrackingSwitch(SwitchEntity):
         if self._device_id not in lst:
             lst.append(self._device_id)
         opts[CONF_MOTION_TRACKING_DEVICES] = sorted(set(lst))
+        
+        # Auto-enable master toggle if turning on any camera
+        opts[CONF_ENABLE_CAMERA_MOTION] = True
+        
         self.hass.config_entries.async_update_entry(self._entry, options=opts)
 
         # Refresh coordinator
@@ -548,6 +552,11 @@ class WyzeCameraMotionTrackingSwitch(SwitchEntity):
         lst = [str(x).upper() for x in (opts.get(CONF_MOTION_TRACKING_DEVICES) or [])]
         lst = [x for x in lst if x != self._device_id]
         opts[CONF_MOTION_TRACKING_DEVICES] = sorted(set(lst))
+        
+        # Auto-disable master toggle if ALL cameras are turned off
+        if not lst:
+            opts[CONF_ENABLE_CAMERA_MOTION] = False
+        
         self.hass.config_entries.async_update_entry(self._entry, options=opts)
 
         # Refresh coordinator
