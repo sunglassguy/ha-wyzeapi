@@ -17,14 +17,11 @@ from .const import (
     ACCESS_TOKEN,
     REFRESH_TOKEN,
     REFRESH_TIME,
-    BULB_LOCAL_CONTROL,
-    DEFAULT_LOCAL_CONTROL,
     KEY_ID,
     API_KEY,
     CONF_ENABLE_CAMERA_MOTION,
     CONF_MOTION_POLL_INTERVAL,
     CONF_MOTION_HOLD_SECONDS,
-    # NOTE: intentionally NOT importing CONF_MOTION_CAMERA_MAC anymore
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -68,7 +65,9 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         await self.get_client()
 
         if user_input is None:
-            return self.async_show_form(step_id="user", data_schema=STEP_USER_DATA_SCHEMA)
+            return self.async_show_form(
+                step_id="user", data_schema=STEP_USER_DATA_SCHEMA
+            )
 
         errors: dict[str, str] = {}
 
@@ -100,7 +99,9 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             # Create new entry
             return self.async_create_entry(title="", data=user_input)
 
-        return self.async_show_form(step_id="user", data_schema=STEP_USER_DATA_SCHEMA, errors=errors)
+        return self.async_show_form(
+            step_id="user", data_schema=STEP_USER_DATA_SCHEMA, errors=errors
+        )
 
     async def async_step_2fa(
         self, user_input: Optional[dict[str, Any]] = None
@@ -122,13 +123,17 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
             if self.hass.config_entries.async_entries(DOMAIN):
                 for entry in self.hass.config_entries.async_entries(DOMAIN):
-                    self.hass.config_entries.async_update_entry(entry, data=self.user_params)
+                    self.hass.config_entries.async_update_entry(
+                        entry, data=self.user_params
+                    )
                     await self.hass.config_entries.async_reload(entry.entry_id)
                     return self.async_abort(reason="reauth_successful")
 
             return self.async_create_entry(title="", data=self.user_params)
 
-        return self.async_show_form(step_id="2fa", data_schema=STEP_2FA_DATA_SCHEMA, errors=errors)
+        return self.async_show_form(
+            step_id="2fa", data_schema=STEP_2FA_DATA_SCHEMA, errors=errors
+        )
 
     async def async_step_import(self, import_config):
         """Import a config entry from configuration.yaml."""
@@ -137,7 +142,9 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_reauth(self, user_input=None):
         """Perform reauth upon an API authentication error."""
         if user_input is None:
-            return self.async_show_form(step_id="reauth_confirm", data_schema=vol.Schema({}))
+            return self.async_show_form(
+                step_id="reauth_confirm", data_schema=vol.Schema({})
+            )
         return await self.async_step_user()
 
     @staticmethod
@@ -155,35 +162,22 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
     async def async_step_init(self, user_input=None):
         """Handle options flow."""
         if user_input is not None:
-            # Backward-compat cleanup: if an old MAC option exists, drop it.
-            user_input.pop("motion_camera_mac", None)  # in case someone used a literal key
-            # Also drop the constant name if it exists in saved options under that key:
-            # (Can't import CONF_MOTION_CAMERA_MAC anymore by design, so delete by string)
-            user_input.pop("motion_camera_mac", None)
-
             return self.async_create_entry(title="", data=user_input)
 
         opts = self.config_entry.options
 
         data_schema = vol.Schema(
             {
-                vol.Optional(
-                    BULB_LOCAL_CONTROL,
-                    default=opts.get(BULB_LOCAL_CONTROL, DEFAULT_LOCAL_CONTROL),
-                ): bool,
-
                 # Master enable for cloud-event driven camera motion
                 vol.Optional(
                     CONF_ENABLE_CAMERA_MOTION,
                     default=opts.get(CONF_ENABLE_CAMERA_MOTION, False),
                 ): bool,
-
-                # Global poll interval (you said min 30)
+                # Global poll interval (minimum 2 seconds)
                 vol.Optional(
                     CONF_MOTION_POLL_INTERVAL,
-                    default=int(opts.get(CONF_MOTION_POLL_INTERVAL, 90)),
-                ): vol.All(vol.Coerce(int), vol.Range(min=1, max=3600)),
-
+                    default=int(opts.get(CONF_MOTION_POLL_INTERVAL, 30)),
+                ): vol.All(vol.Coerce(int), vol.Range(min=2, max=3600)),
                 # Global hold time
                 vol.Optional(
                     CONF_MOTION_HOLD_SECONDS,
