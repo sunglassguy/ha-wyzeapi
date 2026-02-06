@@ -1,67 +1,64 @@
 {
-  "title": "[%key:common::config_flow::data::title%]",
+  "title": "Wyze",
   "config": {
     "step": {
       "user": {
-        "title": "[%key:common::config_flow::data::title%]",
+        "title": "Wyze Integration Setup",
+        "description": "Connect your Wyze account to Home Assistant",
         "data": {
-          "username": "[%key:common::config_flow::data::username%]",
-          "password": "[%key:common::config_flow::data::password%]",
-          "keyid": "[%key:common::config_flow::data::key_id%]",
-          "apikey": "[%key:common::config_flow::data::api_key%]"
+          "username": "Email",
+          "password": "Password",
+          "key_id": "API Key ID",
+          "api_key": "API Key"
         },
         "data_description": {
-          "username": "Wyze or 3rd party OAuth email address",
-          "password": "Wyze or 3rd party OAuth password"
+          "username": "Your Wyze account email address",
+          "password": "Your Wyze account password",
+          "key_id": "API Key ID from Wyze Developer Portal",
+          "api_key": "API Key from Wyze Developer Portal"
         }
       },
       "2fa": {
-        "title": "[%key:common::config_flow::data::title%]",
+        "title": "Two-Factor Authentication",
+        "description": "Enter the verification code sent to your device",
         "data": {
-          "verification_code": "[%key:common::config_flow::data::verification_code%]"
+          "verification_code": "Verification Code"
+        },
+        "data_description": {
+          "verification_code": "6-digit code from SMS, email, or authenticator app"
         }
+      },
+      "reauth_confirm": {
+        "title": "Re-authenticate Wyze",
+        "description": "Your Wyze session has expired. Please enter your password to reconnect."
       }
     },
     "error": {
-      "cannot_connect": "[%key:common::config_flow::error::cannot_connect%]",
-      "invalid_auth": "[%key:common::config_flow::error::invalid_auth%]",
-      "unknown": "[%key:common::config_flow::error::unknown%]"
+      "cannot_connect": "Failed to connect to Wyze servers. Please check your internet connection and try again.",
+      "invalid_auth": "Invalid username, password, or verification code. Please try again.",
+      "unknown": "An unexpected error occurred. Please try again."
     },
     "abort": {
-      "already_configured": "[%key:common::config_flow::abort::already_configured_device%]"
+      "already_configured": "This Wyze account is already configured.",
+      "reauth_successful": "Re-authentication successful! Your Wyze integration is now connected."
     }
   },
   "options": {
     "step": {
-      "init":{
-        "data":{
-          "bulb_local_control": "Use Local Control for Color Bulbs and Light Strips"
-        }
-      },
-      "user": {
-        "title": "[%key:common::config_flow::data::title%]",
+      "init": {
+        "title": "Camera Motion Detection Options",
+        "description": "Configure cloud-based motion detection for your Wyze cameras",
         "data": {
-          "username": "[%key:common::config_flow::data::username%]",
-          "password": "[%key:common::config_flow::data::password%]",
-          "keyid": "[%key:common::config_flow::data::key_id%]",
-          "apikey": "[%key:common::config_flow::data::api_key%]"
-        }
-      },
-      "2fa": {
-        "title": "[%key:common::config_flow::data::title%]",
-        "data": {
-          "verification_code": "[%key:common::config_flow::data::verification_code%]"
+          "enable_camera_motion": "Enable Camera Motion Detection",
+          "motion_poll_interval": "Motion Poll Interval (seconds)",
+          "motion_hold_seconds": "Motion Hold Time (seconds)"
+        },
+        "data_description": {
+          "enable_camera_motion": "Enable cloud-based motion detection polling for cameras. Turn on individual cameras using the Motion Tracking (Cloud) switches.",
+          "motion_poll_interval": "How often to check Wyze cloud for motion events. Lower values = faster detection but more API usage. Minimum: 2 seconds, Recommended: 30 seconds.",
+          "motion_hold_seconds": "How long the motion sensor stays 'on' after detecting motion. Prevents rapid on/off flickering. Recommended: 15 seconds."
         }
       }
-    },
-    "error": {
-      "cannot_connect": "[%key:common::config_flow::error::cannot_connect%]",
-      "invalid_auth": "[%key:common::config_flow::error::invalid_auth%]",
-      "unknown": "[%key:common::config_flow::error::unknown%]"
-    },
-    "abort": {
-      "already_configured": "[%key:common::config_flow::abort::already_configured_device%]",
-      "reauth_successful": "[%key:common::config_flow::abort::reauth_successful%]"
     }
   }
 }
