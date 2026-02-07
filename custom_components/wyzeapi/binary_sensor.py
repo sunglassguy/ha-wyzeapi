@@ -3,10 +3,9 @@ This module describes the connection between Home Assistant and Wyze for Binary 
 
 Design:
 - Keep physical Wyze sensors (PIR/contact) using wyzeapy's update registration.
-- For CAMERA motion: do NOT rely on wyzeapy camera_service.get_cameras()/last_event_ts
-  (doesn't reflect real motion for many users).
+- For CAMERA motion: do NOT rely on wyzeapy camera_service.get_cameras()/last_event_ts.
 - Instead, optionally add per-camera motion binary sensors backed by ONE shared
-  Wyze cloud event_list (v4) polling coordinator (bridge-like).
+  Wyze cloud event_list (v4) polling coordinator.
 """
 
 from __future__ import annotations
@@ -21,7 +20,7 @@ from homeassistant.components.binary_sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_ATTRIBUTION
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
@@ -60,12 +59,7 @@ async def async_setup_entry(
     config_entry: ConfigEntry,
     async_add_entities: Callable[[List[Any], bool], None],
 ):
-    """
-    Set up Wyze binary sensors.
-
-    - Physical sensors (PIR/contact): register for updates.
-    - Camera motion (optional): create per-camera entities driven by ONE shared cloud-events coordinator.
-    """
+    """Set up Wyze binary sensors."""
     _LOGGER.debug("Creating new WyzeApi binary sensor component")
 
     client: Wyzeapy = hass.data[DOMAIN][config_entry.entry_id][CONF_CLIENT]
@@ -88,7 +82,6 @@ async def async_setup_entry(
     camera_service: CameraService = await client.camera_service
     cameras: list[Camera] = await camera_service.get_cameras()
 
-    # Build / reuse ONE coordinator for this entry
     entry_data = hass.data[DOMAIN][config_entry.entry_id]
     coord: Optional[WyzeMotionEventsCoordinator] = entry_data.get("motion_events_coordinator")
 
@@ -102,7 +95,6 @@ async def async_setup_entry(
         )
         await coord.async_config_entry_first_refresh()
         entry_data["motion_events_coordinator"] = coord
-        _LOGGER.debug("Created global motion events coordinator interval_s=%s", interval_s)
 
     motion_entities = [
         WyzeCameraMotionEventBinarySensor(
@@ -136,8 +128,9 @@ class WyzeSensor(BinarySensorEntity):
         await self._sensor_service.deregister_for_updates(self._sensor)
 
     def process_update(self, sensor: Sensor):
+        """Handle sensor updates from the Wyze service."""
         self._sensor = sensor
-        # register_for_updates callbacks can arrive off-loop; bounce to loop safely
+        # Bounce to loop safely if arriving off-thread
         if self.hass:
             self.hass.loop.call_soon_threadsafe(self.async_write_ha_state)
 
@@ -152,7 +145,6 @@ class WyzeSensor(BinarySensorEntity):
 
     @property
     def available(self) -> bool:
-        # physical sensors report their own availability
         return bool(getattr(self._sensor, "available", True))
 
     @property
@@ -222,50 +214,41 @@ class WyzeCameraMotionEventBinarySensor(CoordinatorEntity, BinarySensorEntity):
 
     @property
     def available(self) -> bool:
-        # available if coordinator is healthy AND this device is enabled for tracking
         enabled = self.hass.data[DOMAIN][self._entry_id].get("motion_tracking_enabled") or set()
         return self.coordinator.last_update_success and (self._device_id in enabled)
 
+    @callback
     def _handle_coordinator_update(self) -> None:
+        """Process update from the coordinator."""
         data = self.coordinator.data or {}
         devs = data.get("devices") or {}
         d = devs.get(self._device_id) or {}
-        _LOGGER.debug(
-            "Binary sensor update [%s]: last_event_ts=%s event_id=%s",
-            self._device_id,
-            d.get("last_event_ts"),
-            d.get("event_id"),
-        )
-        self.async_write_ha_state()
+        ts_ms = d.get("last_event_ts")
+
+        # Check for new motion event and trigger hold timer
+        if ts_ms and (self._last_seen_event_ms is None or ts_ms > self._last_seen_event_ms):
+            self._last_seen_event_ms = ts_ms
+            self._schedule_turn_off()
+
+        super()._handle_coordinator_update()
 
     def _schedule_turn_off(self) -> None:
+        """Schedule a state write when the hold time expires."""
         if self._unsub_off:
             self._unsub_off()
             self._unsub_off = None
 
+        @callback
         def _cb(_now):
-            # async_call_later callback runs on the event loop -> safe
+            """Write state to HA on the event loop."""
             self.async_write_ha_state()
 
         self._unsub_off = async_call_later(self.hass, self._hold.total_seconds(), _cb)
 
     @property
     def is_on(self) -> bool:
-        if not self.available:
+        if not self.available or not self._last_seen_event_ms:
             return False
-
-        data = self.coordinator.data or {}
-        devs = data.get("devices") or {}
-        d = devs.get(self._device_id) or {}
-        ts_ms = d.get("last_event_ts")
-
-        if not ts_ms:
-            return False
-
-        # Track newest event and schedule a refresh when hold expires
-        if self._last_seen_event_ms is None or ts_ms > self._last_seen_event_ms:
-            self._last_seen_event_ms = ts_ms
-            self._schedule_turn_off()
 
         try:
             event_dt = dt_util.utc_from_timestamp(self._last_seen_event_ms / 1000.0)
