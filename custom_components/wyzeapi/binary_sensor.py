@@ -130,7 +130,6 @@ class WyzeSensor(BinarySensorEntity):
     def process_update(self, sensor: Sensor):
         """Handle sensor updates from the Wyze service."""
         self._sensor = sensor
-        # Bounce to loop safely if arriving off-thread
         if self.hass:
             self.hass.loop.call_soon_threadsafe(self.async_write_ha_state)
 
@@ -196,9 +195,10 @@ class WyzeCameraMotionEventBinarySensor(CoordinatorEntity, BinarySensorEntity):
         self._camera_name = camera_name
         self._camera_model = camera_model
 
-        self._hold = timedelta(seconds=int(hold_seconds))
+        self._hold_seconds = float(hold_seconds)
         self._last_seen_event_ms: Optional[int] = None
         self._unsub_off = None
+        self._state_is_on = False
 
         self._attr_unique_id = f"{self._device_id}-motion-event"
         self._attr_name = f"{self._camera_name} Motion (Cloud)"
@@ -225,37 +225,34 @@ class WyzeCameraMotionEventBinarySensor(CoordinatorEntity, BinarySensorEntity):
         d = devs.get(self._device_id) or {}
         ts_ms = d.get("last_event_ts")
 
-        # Check for new motion event and trigger hold timer
+        # Check for a brand new motion event
         if ts_ms and (self._last_seen_event_ms is None or ts_ms > self._last_seen_event_ms):
             self._last_seen_event_ms = ts_ms
+            self._state_is_on = True
             self._schedule_turn_off()
-
+        
+        # We always call the base handler to ensure HA is updated
         super()._handle_coordinator_update()
 
     def _schedule_turn_off(self) -> None:
-        """Schedule a state write when the hold time expires."""
+        """Schedule the sensor to turn off after the hold duration."""
         if self._unsub_off:
             self._unsub_off()
             self._unsub_off = None
 
         @callback
-        def _cb(_now):
-            """Write state to HA on the event loop."""
+        def _timer_finished(_now):
+            """Reset state and update HA."""
+            self._state_is_on = False
+            self._unsub_off = None
             self.async_write_ha_state()
 
-        self._unsub_off = async_call_later(self.hass, self._hold.total_seconds(), _cb)
+        self._unsub_off = async_call_later(self.hass, self._hold_seconds, _timer_finished)
 
     @property
     def is_on(self) -> bool:
-        if not self.available or not self._last_seen_event_ms:
-            return False
-
-        try:
-            event_dt = dt_util.utc_from_timestamp(self._last_seen_event_ms / 1000.0)
-        except Exception:
-            return False
-
-        return (dt_util.utcnow() - event_dt) <= self._hold
+        """Return true if motion is currently active based on our internal timer."""
+        return self._state_is_on
 
     async def async_will_remove_from_hass(self) -> None:
         if self._unsub_off:
