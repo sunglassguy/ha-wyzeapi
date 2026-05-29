@@ -17,7 +17,6 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from wyzeapy.const import (
     API_KEY,
     APP_NAME,
-    APP_VER,
     APP_VERSION,
     PHONE_ID,
     PHONE_SYSTEM_TYPE,
@@ -150,7 +149,6 @@ def patch_wyzeapy_http(hass: HomeAssistant) -> None:
             "sc": SC,
             "sv": SV,
             "phone_system_type": PHONE_SYSTEM_TYPE,
-            "app_ver": APP_VER,
             "ts": int(time.time()),
             "refresh_token": self.token.refresh_token,
         }
