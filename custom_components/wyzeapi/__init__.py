@@ -34,7 +34,7 @@ from .const import (
     REFRESH_TOKEN,
     WYZE_NOTIFICATION_TOGGLE,
 )
-from .http import is_transient_exception
+from .http import async_setup_wyze_http, is_transient_exception
 from .token_manager import TokenManager
 from .wyzeapy_patch import patch_wyzeapy_http
 
@@ -100,6 +100,7 @@ async def async_setup(
 
 async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> bool:
     """Set up Wyze Home Assistant Integration from a config entry."""
+    await async_setup_wyze_http(hass)
     patch_wyzeapy_http(hass)
     hass.data.setdefault(DOMAIN, {})
 
