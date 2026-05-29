@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import ssl
 from typing import Any
@@ -49,9 +50,9 @@ _SSL_CONTEXT: ssl.SSLContext | None = None
 def wyze_ssl_context() -> ssl.SSLContext:
     """Return an SSL context for Wyze API calls.
 
-    This keeps certificate and hostname verification enabled, but relaxes
-    Python 3.13+'s strict X.509 mode for compatibility with older/nonstandard
-    chains seen from some cloud endpoints or proxies.
+    Certificate and hostname verification remain enabled. We only relax Python
+    3.13+'s strict X.509 verification flag for compatibility with cloud
+    endpoints or TLS-inspecting networks that fail strict chain validation.
     """
     global _SSL_CONTEXT
 
@@ -60,8 +61,6 @@ def wyze_ssl_context() -> ssl.SSLContext:
 
     ctx = ssl.create_default_context(cafile=certifi.where())
 
-    # Do not disable TLS verification. Only relax Python 3.13+'s strict
-    # certificate-chain validation mode for Wyze cloud requests.
     if hasattr(ssl, "VERIFY_X509_STRICT"):
         ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT
 
@@ -69,8 +68,17 @@ def wyze_ssl_context() -> ssl.SSLContext:
     return ctx
 
 
-def _should_retry_status(status: int) -> bool:
+def is_transient_status(status: int) -> bool:
+    """Return True for HTTP statuses that should be retried."""
     return status == 429 or 500 <= status <= 599
+
+
+def is_transient_exception(err: BaseException) -> bool:
+    """Return True for network/HTTP failures that are usually temporary."""
+    if isinstance(err, ClientResponseError):
+        return is_transient_status(err.status)
+
+    return isinstance(err, TRANSIENT_EXCEPTIONS)
 
 
 async def _sleep_before_retry(attempt: int) -> None:
@@ -86,7 +94,7 @@ async def request_json_with_retries(
     logger: logging.Logger = _LOGGER,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    """Request JSON from Wyze with sane timeout, SSL context, and retries."""
+    """Request JSON from Wyze with timeout, SSL context, and retries."""
     kwargs.setdefault("timeout", WYZE_REQUEST_TIMEOUT)
     kwargs.setdefault("ssl", wyze_ssl_context())
 
@@ -95,9 +103,24 @@ async def request_json_with_retries(
     for attempt in range(retries):
         try:
             async with session.request(method, url, **kwargs) as resp:
+                if is_transient_status(resp.status):
+                    body = await resp.text()
+                    raise ClientResponseError(
+                        resp.request_info,
+                        resp.history,
+                        status=resp.status,
+                        message=(
+                            f"Transient Wyze HTTP status {resp.status}: "
+                            f"{body[:300]}"
+                        ),
+                        headers=resp.headers,
+                    )
+
+                resp.raise_for_status()
+
                 try:
-                    data = await resp.json(content_type=None)
-                except ContentTypeError:
+                    return await resp.json(content_type=None)
+                except (ContentTypeError, json.JSONDecodeError, ValueError) as err:
                     body = await resp.text()
                     logger.debug(
                         "Non-JSON Wyze response from %s %s: status=%s body=%s",
@@ -106,25 +129,12 @@ async def request_json_with_retries(
                         resp.status,
                         body[:500],
                     )
-                    resp.raise_for_status()
-                    raise
-
-                if _should_retry_status(resp.status):
-                    raise ClientResponseError(
-                        resp.request_info,
-                        resp.history,
-                        status=resp.status,
-                        message=f"Transient Wyze HTTP status {resp.status}",
-                        headers=resp.headers,
-                    )
-
-                resp.raise_for_status()
-                return data
+                    raise err
 
         except ClientResponseError as err:
             last_err = err
 
-            if not _should_retry_status(err.status) or attempt >= retries - 1:
+            if not is_transient_status(err.status) or attempt >= retries - 1:
                 raise
 
             logger.debug(
