@@ -21,6 +21,8 @@ from aiohttp import (
     ServerDisconnectedError,
 )
 
+from homeassistant.core import HomeAssistant
+
 _LOGGER = logging.getLogger(__name__)
 
 WYZE_HTTP_RETRIES = 3
@@ -47,25 +49,39 @@ TRANSIENT_EXCEPTIONS = (
 _SSL_CONTEXT: ssl.SSLContext | None = None
 
 
-def wyze_ssl_context() -> ssl.SSLContext:
-    """Return an SSL context for Wyze API calls.
+def _build_wyze_ssl_context() -> ssl.SSLContext:
+    """Build the Wyze SSL context.
 
-    Certificate and hostname verification remain enabled. We only relax Python
-    3.13+'s strict X.509 verification flag for compatibility with cloud
-    endpoints or TLS-inspecting networks that fail strict chain validation.
+    This performs filesystem I/O via certifi/load_verify_locations, so it must
+    only be called in Home Assistant's executor, not directly in the event loop.
     """
-    global _SSL_CONTEXT
-
-    if _SSL_CONTEXT is not None:
-        return _SSL_CONTEXT
-
     ctx = ssl.create_default_context(cafile=certifi.where())
 
+    # Keep TLS verification enabled. Only relax Python 3.13+'s stricter X.509
+    # chain validation mode, which can reject older/nonstandard certificate
+    # chains from cloud services or TLS-inspecting networks.
     if hasattr(ssl, "VERIFY_X509_STRICT"):
         ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT
 
-    _SSL_CONTEXT = ctx
     return ctx
+
+
+async def async_setup_wyze_http(hass: HomeAssistant) -> None:
+    """Preload SSL context outside the event loop."""
+    global _SSL_CONTEXT
+
+    if _SSL_CONTEXT is None:
+        _SSL_CONTEXT = await hass.async_add_executor_job(_build_wyze_ssl_context)
+
+
+def wyze_ssl_context() -> ssl.SSLContext:
+    """Return the preloaded Wyze SSL context."""
+    if _SSL_CONTEXT is None:
+        raise RuntimeError(
+            "Wyze SSL context was used before async_setup_wyze_http() completed"
+        )
+
+    return _SSL_CONTEXT
 
 
 def is_transient_status(status: int) -> bool:
