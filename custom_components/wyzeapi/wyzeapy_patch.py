@@ -41,6 +41,11 @@ def _session():
     return async_get_clientsession(_PATCHED_HASS)
 
 
+def _app_ver() -> str:
+    """Return the app_ver value expected by Wyze."""
+    return f"{APP_NAME}___{APP_VERSION}"
+
+
 def patch_wyzeapy_http(hass: HomeAssistant) -> None:
     """Patch wyzeapy to use Home Assistant's shared aiohttp session."""
     global _PATCHED_HASS
@@ -146,12 +151,21 @@ def patch_wyzeapy_http(hass: HomeAssistant) -> None:
             "phone_id": PHONE_ID,
             "app_name": APP_NAME,
             "app_version": APP_VERSION,
+            "app_ver": _app_ver(),
             "sc": SC,
             "sv": SV,
             "phone_system_type": PHONE_SYSTEM_TYPE,
             "ts": int(time.time()),
             "refresh_token": self.token.refresh_token,
+            "access_token": self.token.access_token,
         }
+
+        _LOGGER.debug(
+            "Refreshing Wyze token with app_name=%s app_version=%s app_ver=%s",
+            payload["app_name"],
+            payload["app_version"],
+            payload["app_ver"],
+        )
 
         response_json = await _request_json(
             self,
