@@ -1,37 +1,39 @@
 from __future__ import annotations
 
+import asyncio
 import hmac
 import json
 import logging
 import time
-from dataclasses import asdict
 from datetime import datetime
 from hashlib import md5
 from os import getenv
-from typing import Any, Optional, Tuple, List, Dict
+from typing import Any, Dict, List, Optional
 
-from aiohttp import ClientResponseError
+from aiohttp import ClientResponseError, ContentTypeError
 from aiohttp.client import ClientSession
 
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.config_entries import ConfigEntry
 
-from .wyze_cloud_models import WyzeCredential
-from homeassistant.const import CONF_USERNAME, CONF_PASSWORD
-from .const import (
-    KEY_ID,
-    API_KEY,
-    ACCESS_TOKEN,
-    REFRESH_TOKEN,
+from .const import ACCESS_TOKEN, API_KEY, KEY_ID, REFRESH_TOKEN
+from .http import (
+    TRANSIENT_EXCEPTIONS,
+    WYZE_REQUEST_TIMEOUT,
+    is_transient_exception,
+    is_transient_status,
+    wyze_ssl_context,
 )
+from .wyze_cloud_models import WyzeCredential
 
 _LOGGER = logging.getLogger(__name__)
 
-# Keep these minimal; exact values are not critical for get_event_list as long as consistent
+# Keep these minimal; exact values are not critical for get_event_list as long
+# as they are consistent.
 APP_VERSION = "2.50.0"
 IOS_VERSION = "17.0"
-
 AUTH_API = "https://auth-prod.api.wyze.com"
 WYZE_API = "https://api.wyzecam.com/app"
 CLOUD_API = "https://app-core.cloud.wyze.com/app"
@@ -48,14 +50,15 @@ SC_SV = {
 }
 
 APP_KEY = {"9319141212m2ik": "wyze_app_secret_key_132"}
-WYZE_APP_API_KEY = "WMXHYf79Nr5gIlt3r0r7p9Tcw5bvs6BB4U8O8nGJ"
 
 
 class AccessTokenError(Exception):
-    pass
+    """Raised when the Wyze access token is missing or invalid."""
 
 
 class RateLimitError(Exception):
+    """Raised when Wyze rate-limit headers indicate a cooldown is needed."""
+
     def __init__(self, remaining: int, reset_by: int, reset_header: str = ""):
         self.remaining = remaining
         self.reset_by = reset_by
@@ -63,6 +66,8 @@ class RateLimitError(Exception):
 
 
 class WyzeAPIError(Exception):
+    """Raised for a semantic Wyze API error response."""
+
     def __init__(self, code: str, msg: str, method: str, path: str):
         self.code = code
         self.msg = msg
@@ -87,11 +92,14 @@ def _headers_default() -> dict[str, str]:
 
 def hash_password(password: str) -> str:
     encoded = password.strip()
+
     for ex in ("hashed:", "md5:"):
         if encoded.lower().startswith(ex):
-            return encoded[len(ex):]
+            return encoded[len(ex) :]
+
     for _ in range(3):
         encoded = md5(encoded.encode("ascii")).hexdigest()  # nosec
+
     return encoded
 
 
@@ -101,9 +109,11 @@ def sort_dict(payload: dict) -> str:
 
 def sign_msg(app_id: str, msg: str | dict, token: str = "") -> str:
     secret = getenv(app_id, APP_KEY.get(app_id, app_id))
-    key = md5((token + secret).encode()).hexdigest().encode()
+    key = md5((token + secret).encode()).hexdigest().encode()  # nosec
+
     if isinstance(msg, dict):
         msg = sort_dict(msg)
+
     return hmac.new(key, msg.encode(), md5).hexdigest()  # nosec
 
 
@@ -126,6 +136,7 @@ def sign_payload(auth: WyzeCredential, app_id: str, payload: str) -> dict[str, s
 
 def _payload(auth: WyzeCredential, endpoint: str = "default") -> dict[str, Any]:
     values = SC_SV.get(endpoint, SC_SV["default"])
+
     return {
         "sc": values["sc"],
         "sv": values["sv"],
@@ -141,24 +152,57 @@ def _payload(auth: WyzeCredential, endpoint: str = "default") -> dict[str, Any]:
 
 def _parse_reset_by(reset_by: str) -> int:
     ts_format = "%a %b %d %H:%M:%S %Z %Y"
+
     try:
         return int(datetime.strptime(reset_by, ts_format).timestamp())
     except Exception:
         return 0
 
 
-async def _validate_resp(resp) -> dict:
-    # Rate limit header check (matches the bridge idea)
+def _check_rate_limit(headers) -> None:
     try:
-        remaining = int(resp.headers.get("X-RateLimit-Remaining", "100"))
+        remaining = int(headers.get("X-RateLimit-Remaining", "100"))
     except Exception:
         remaining = 100
 
     if remaining <= 10:
-        reset_header = resp.headers.get("X-RateLimit-Reset-By", "")
+        reset_header = headers.get("X-RateLimit-Reset-By", "")
         raise RateLimitError(remaining, _parse_reset_by(reset_header), reset_header)
 
-    data = await resp.json()
+
+async def _validate_resp(resp) -> dict:
+    if is_transient_status(resp.status):
+        body = await resp.text()
+        raise ClientResponseError(
+            resp.request_info,
+            resp.history,
+            status=resp.status,
+            message=f"Transient Wyze HTTP status {resp.status}: {body[:300]}",
+            headers=resp.headers,
+        )
+
+    resp.raise_for_status()
+    _check_rate_limit(resp.headers)
+
+    try:
+        data = await resp.json(content_type=None)
+    except ContentTypeError as err:
+        body = await resp.text()
+        raise WyzeAPIError(
+            "non_json_response",
+            f"Wyze returned non-JSON response: status={resp.status}, body={body[:300]}",
+            resp.request_info.method,
+            str(resp.request_info.url),
+        ) from err
+    except (json.JSONDecodeError, ValueError) as err:
+        body = await resp.text()
+        raise WyzeAPIError(
+            "invalid_json_response",
+            f"Wyze returned invalid JSON: status={resp.status}, body={body[:300]}",
+            resp.request_info.method,
+            str(resp.request_info.url),
+        ) from err
+
     code = str(data.get("code", data.get("errorCode", 0)))
 
     if code == "2001":
@@ -166,17 +210,28 @@ async def _validate_resp(resp) -> dict:
 
     if code not in {"1", "0"}:
         msg = data.get("msg", data.get("description", code))
-        raise WyzeAPIError(code, msg, resp.request_info.method, str(resp.request_info.url))
+        raise WyzeAPIError(
+            code,
+            msg,
+            resp.request_info.method,
+            str(resp.request_info.url),
+        )
 
-    # HTTP-level errors
-    resp.raise_for_status()
     return data.get("data", data)
 
 
 class WyzeCloudEventsApi:
-    """Async Wyze cloud client for get_event_list (v4) only."""
+    """Async Wyze cloud client for get_event_list v4 only."""
 
-    def __init__(self, hass: HomeAssistant, auth: Optional[WyzeCredential], email: str, password: str, key_id: str, api_key: str):
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        auth: Optional[WyzeCredential],
+        email: str,
+        password: str,
+        key_id: str,
+        api_key: str,
+    ):
         self._hass = hass
         self._session: ClientSession = async_get_clientsession(hass)
         self._email = email
@@ -189,13 +244,12 @@ class WyzeCloudEventsApi:
     def from_config_entry(cls, hass: HomeAssistant, entry: ConfigEntry) -> "WyzeCloudEventsApi":
         data = entry.data
 
-        # Prefer stored tokens (especially when 2FA was used)
+        # Prefer stored tokens, especially when 2FA was used.
         auth = WyzeCredential(
             access_token=data.get(ACCESS_TOKEN),
             refresh_token=data.get(REFRESH_TOKEN),
         )
 
-        # If phone_id was ever saved elsewhere you could reuse it; random is OK.
         return cls(
             hass=hass,
             auth=auth,
@@ -205,18 +259,65 @@ class WyzeCloudEventsApi:
             api_key=data.get(API_KEY, ""),
         )
 
+    async def _post_json(
+        self,
+        url: str,
+        *,
+        json_payload: dict | None = None,
+        data: str | bytes | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> dict:
+        """POST to Wyze and validate JSON response with retries."""
+        last_err: BaseException | None = None
+
+        for attempt in range(3):
+            try:
+                async with self._session.post(
+                    url,
+                    json=json_payload,
+                    data=data,
+                    headers=headers,
+                    timeout=WYZE_REQUEST_TIMEOUT,
+                    ssl=wyze_ssl_context(),
+                ) as resp:
+                    return await _validate_resp(resp)
+
+            except ClientResponseError as err:
+                last_err = err
+
+                if not is_transient_status(err.status) or attempt >= 2:
+                    raise
+
+            except TRANSIENT_EXCEPTIONS as err:
+                last_err = err
+
+                if attempt >= 2:
+                    raise
+
+            await asyncio.sleep(min(0.75 * (2**attempt), 5.0))
+
+        if last_err is not None:
+            raise last_err
+
+        raise WyzeAPIError("request_failed", f"Wyze request failed: {url}", "POST", url)
+
     async def _login(self) -> bool:
         if not (self._email and self._password and self._key_id and self._api_key):
-            _LOGGER.error("Missing Wyze credentials for cloud login (email/password/key_id/api_key).")
+            _LOGGER.error(
+                "Missing Wyze credentials for cloud login "
+                "(email/password/key_id/api_key)."
+            )
             return False
 
         payload = {"email": self._email.strip(), "password": hash_password(self._password)}
         headers = _headers_for_login(self._key_id, self._api_key)
 
-        async with self._session.post(f"{AUTH_API}/api/user/login", json=payload, headers=headers) as resp:
-            data = await _validate_resp(resp)
+        data = await self._post_json(
+            f"{AUTH_API}/api/user/login",
+            json_payload=payload,
+            headers=headers,
+        )
 
-        # Populate WyzeCredential from response
         phone_id = data.get("phone_id") or (self.auth.phone_id if self.auth else None)
         self.auth = WyzeCredential(
             access_token=data.get("access_token"),
@@ -226,8 +327,11 @@ class WyzeCloudEventsApi:
             mfa_details=data.get("mfa_details"),
             sms_session_id=data.get("sms_session_id"),
             email_session_id=data.get("email_session_id"),
-            phone_id=phone_id or (self.auth.phone_id if self.auth else None) or WyzeCredential().phone_id,
+            phone_id=phone_id
+            or (self.auth.phone_id if self.auth else None)
+            or WyzeCredential().phone_id,
         )
+
         return bool(self.auth and self.auth.access_token)
 
     async def _refresh(self) -> bool:
@@ -237,17 +341,20 @@ class WyzeCloudEventsApi:
         payload = _payload(self.auth)
         payload["refresh_token"] = self.auth.refresh_token
 
-        async with self._session.post(f"{WYZE_API}/user/refresh_token", json=payload, headers=_headers_default()) as resp:
-            data = await _validate_resp(resp)
+        data = await self._post_json(
+            f"{WYZE_API}/user/refresh_token",
+            json_payload=payload,
+            headers=_headers_default(),
+        )
 
-        # Preserve phone_id/user_id
+        # Preserve phone_id/user_id.
         self.auth.access_token = data.get("access_token") or self.auth.access_token
         self.auth.refresh_token = data.get("refresh_token") or self.auth.refresh_token
+
         return bool(self.auth.access_token)
 
     async def post_device_v4(self, endpoint: str, params: dict) -> dict:
         if not self.auth or not self.auth.access_token:
-            # Try refresh (if we have refresh_token) or login
             if not (await self._refresh()):
                 ok = await self._login()
                 if not ok:
@@ -259,8 +366,11 @@ class WyzeCloudEventsApi:
         payload = sort_dict(params)
         headers = sign_payload(self.auth, "9319141212m2ik", payload)
 
-        async with self._session.post(device_url, data=payload, headers=headers) as resp:
-            return await _validate_resp(resp)
+        return await self._post_json(
+            device_url,
+            data=payload,
+            headers=headers,
+        )
 
     async def get_events(
         self,
@@ -278,21 +388,22 @@ class WyzeCloudEventsApi:
             "event_value_list": [],
             "event_tag_list": [],
         }
-    
+
         try:
             resp = await self.post_device_v4("get_event_list", params)
             return resp.get("event_list", []) or []
-    
         except AccessTokenError:
             if await self._refresh() or await self._login():
                 resp = await self.post_device_v4("get_event_list", params)
                 return resp.get("event_list", []) or []
+
             return []
-    
         except RateLimitError as ex:
             _LOGGER.warning("Wyze events rate-limited; cooling down until %s", ex.reset_by)
             return []
-    
-        except (ClientResponseError, WyzeAPIError, Exception) as ex:
+        except Exception as ex:
+            if is_transient_exception(ex):
+                raise
+
             _LOGGER.warning("Wyze events error: %s", ex)
             return []
