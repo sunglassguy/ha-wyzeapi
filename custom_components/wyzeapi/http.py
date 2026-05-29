@@ -1,4 +1,4 @@
-"""HTTP helpers for Wyze cloud calls."""
+\"""HTTP helpers for Wyze cloud calls."""
 
 from __future__ import annotations
 
@@ -68,6 +68,13 @@ async def async_setup_wyze_http(hass: HomeAssistant) -> None:
     if _SSL_CONTEXT is None:
         _SSL_CONTEXT = await hass.async_add_executor_job(_build_wyze_ssl_context)
 
+        _LOGGER.warning(
+            "Wyze API TLS certificate verification is disabled for this integration "
+            "only. check_hostname=%s verify_mode=%s",
+            _SSL_CONTEXT.check_hostname,
+            _SSL_CONTEXT.verify_mode,
+        )
+
 
 def wyze_ssl_context() -> ssl.SSLContext:
     """Return the preloaded Wyze SSL context."""
@@ -106,13 +113,24 @@ async def request_json_with_retries(
     **kwargs: Any,
 ) -> dict[str, Any]:
     """Request JSON from Wyze with timeout, SSL context, and retries."""
-    kwargs.setdefault("timeout", WYZE_REQUEST_TIMEOUT)
-    kwargs.setdefault("ssl", wyze_ssl_context())
+    kwargs["timeout"] = kwargs.get("timeout", WYZE_REQUEST_TIMEOUT)
+
+    # Important: force our Wyze SSL context. Do not use setdefault here.
+    # Some callers or session defaults may already provide ssl=True.
+    kwargs["ssl"] = wyze_ssl_context()
 
     last_err: BaseException | None = None
 
     for attempt in range(retries):
         try:
+            logger.debug(
+                "Wyze request %s %s using ssl check_hostname=%s verify_mode=%s",
+                method.upper(),
+                url,
+                kwargs["ssl"].check_hostname,
+                kwargs["ssl"].verify_mode,
+            )
+
             async with session.request(method, url, **kwargs) as resp:
                 if is_transient_status(resp.status):
                     body = await resp.text()
