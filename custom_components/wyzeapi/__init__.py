@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
+from aiohttp import ClientError
 from aiohttp.client_exceptions import ClientConnectorError
+
 from homeassistant.config_entries import (
     ConfigEntry,
     ConfigEntryNotReady,
     SOURCE_IMPORT,
 )
-from homeassistant.const import CONF_USERNAME, CONF_PASSWORD
+from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers import device_registry as dr
@@ -21,24 +24,26 @@ from wyzeapy.exceptions import AccessTokenError
 from wyzeapy.wyze_auth_lib import Token
 
 from .const import (
-    DOMAIN,
-    CONF_CLIENT,
     ACCESS_TOKEN,
-    REFRESH_TOKEN,
-    REFRESH_TIME,
-    WYZE_NOTIFICATION_TOGGLE,
-    KEY_ID,
     API_KEY,
+    CONF_CLIENT,
     CONF_MOTION_TRACKING_DEVICES,
+    DOMAIN,
+    KEY_ID,
+    REFRESH_TIME,
+    REFRESH_TOKEN,
+    WYZE_NOTIFICATION_TOGGLE,
 )
+from .http import is_transient_exception
 from .token_manager import TokenManager
+from .wyzeapy_patch import patch_wyzeapy_http
 
 _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS = [
     "binary_sensor",  # Camera motion detection
-    "switch",         # Camera controls + motion tracking toggles
-    # "sensor",         # Camera battery sensors
+    "switch",  # Camera controls + motion tracking toggles
+    # "sensor",  # Camera battery sensors
 ]
 
 
@@ -48,7 +53,9 @@ def _norm_mac(value: str) -> str:
 
 
 async def async_setup(
-    hass: HomeAssistant, config: HomeAssistantConfig, discovery_info=None
+    hass: HomeAssistant,
+    config: HomeAssistantConfig,
+    discovery_info=None,
 ):
     """Set up the WyzeApi domain."""
     if hass.config_entries.async_entries(DOMAIN):
@@ -87,12 +94,13 @@ async def async_setup(
                 },
             )
         )
+
     return True
 
 
 async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> bool:
     """Set up Wyze Home Assistant Integration from a config entry."""
-
+    patch_wyzeapy_http(hass)
     hass.data.setdefault(DOMAIN, {})
 
     key_id = config_entry.data.get(KEY_ID)
@@ -119,52 +127,63 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
             api_key,
             token,
         )
-    except ClientConnectorError as err:
-        raise ConfigEntryNotReady("Unable to login due to network issues.") from err
     except AccessTokenError:
         _LOGGER.error(
-            "Wyzeapi: Could not login. Please re-login through integration configuration"
+            "Wyzeapi: Could not login. Please re-login through integration "
+            "configuration"
         )
         raise ConfigEntryAuthFailed("Unable to login, please re-login.") from None
+    except (ClientConnectorError, ClientError, asyncio.TimeoutError, TimeoutError, OSError) as err:
+        raise ConfigEntryNotReady("Unable to login due to network issues.") from err
 
-    # Store client + shared integration state
+    # Store client + shared integration state.
     hass.data[DOMAIN][config_entry.entry_id] = {
         CONF_CLIENT: client,
         "key_id": key_id,
         "api_key": api_key,
-        # Runtime set of enabled device_ids for motion tracking
+        # Runtime set of enabled device_ids for motion tracking.
         "motion_tracking_enabled": set(),
-        # Global coordinator placeholder (created by binary_sensor.py when needed)
+        # Global coordinator placeholder, created by binary_sensor.py when needed.
         "motion_events_coordinator": None,
     }
 
-    # Set defaults for options
+    # Set defaults for options.
     options_dict = dict(config_entry.options)
     options_dict.setdefault(CONF_MOTION_TRACKING_DEVICES, [])
     hass.config_entries.async_update_entry(config_entry, options=options_dict)
 
-    # Hydrate enabled set from persisted options list
+    # Hydrate enabled set from persisted options list.
     enabled_list = options_dict.get(CONF_MOTION_TRACKING_DEVICES, []) or []
     enabled_set = {str(x).upper() for x in enabled_list if str(x).strip()}
     hass.data[DOMAIN][config_entry.entry_id]["motion_tracking_enabled"] = enabled_set
 
-    # Load platforms
+    # Load platforms before best-effort cleanup so transient Wyze cloud failures do
+    # not block entity setup.
     await hass.config_entries.async_forward_entry_setups(config_entry, PLATFORMS)
 
-    # Device registry cleanup (normalized MACs)
-    mac_addresses = await client.unique_device_ids
-    normalized_macs = {_norm_mac(m) for m in mac_addresses}
-    normalized_macs.add(_norm_mac(WYZE_NOTIFICATION_TOGGLE))
+    try:
+        mac_addresses = await client.unique_device_ids
+        normalized_macs = {_norm_mac(m) for m in mac_addresses}
+        normalized_macs.add(_norm_mac(WYZE_NOTIFICATION_TOGGLE))
 
-    # Add HMS ID if present (though you probably don't use it)
-    hms_service = await client.hms_service
-    hms_id = hms_service.hms_id
-    if hms_id:
-        normalized_macs.add(_norm_mac(hms_id))
+        hms_service = await client.hms_service
+        hms_id = hms_service.hms_id
+        if hms_id:
+            normalized_macs.add(_norm_mac(hms_id))
+    except Exception as err:
+        if is_transient_exception(err):
+            _LOGGER.warning(
+                "Skipping Wyze stale-device cleanup because Wyze cloud is "
+                "temporarily unavailable: %s",
+                err,
+            )
+            return True
+        raise
 
     device_registry = dr.async_get(hass)
     for device in dr.async_entries_for_config_entry(
-        device_registry, config_entry.entry_id
+        device_registry,
+        config_entry.entry_id,
     ):
         for identifier in device.identifiers:
             domain, mac = identifier
@@ -173,7 +192,8 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
 
             if _norm_mac(mac) not in normalized_macs:
                 _LOGGER.warning(
-                    "%s is not in the mac_addresses list, removing the entry", mac
+                    "%s is not in the mac_addresses list, removing the entry",
+                    mac,
                 )
                 device_registry.async_remove_device(device.id)
                 break
@@ -189,4 +209,9 @@ async def options_update_listener(hass: HomeAssistant, config_entry: ConfigEntry
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
-    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+
+    if unload_ok:
+        hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
+
+    return unload_ok
