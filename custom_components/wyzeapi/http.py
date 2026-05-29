@@ -1,5 +1,3 @@
-\"""HTTP helpers for Wyze cloud calls."""
-
 from __future__ import annotations
 
 import asyncio
