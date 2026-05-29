@@ -1,7 +1,8 @@
 """Runtime HTTP patching for wyzeapy.
 
-wyzeapy currently creates a new aiohttp ClientSession inside request helpers.
-In Home Assistant, integrations should use HA's managed session instead.
+wyzeapy creates short-lived aiohttp ClientSession objects inside its request
+helpers. In Home Assistant, the integration should use Home Assistant's shared
+managed session instead.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from wyzeapy.const import (
     API_KEY,
     APP_NAME,
+    APP_VER,
     APP_VERSION,
     PHONE_ID,
     PHONE_SYSTEM_TYPE,
@@ -30,15 +32,24 @@ from .http import request_json_with_retries
 _LOGGER = logging.getLogger(__name__)
 
 _REFRESH_TOKEN_URL = "https://api.wyzecam.com/app/user/refresh_token"
+_PATCHED_HASS: HomeAssistant | None = None
+
+
+def _session():
+    if _PATCHED_HASS is None:
+        raise RuntimeError("wyzeapy HTTP transport was used before being patched")
+
+    return async_get_clientsession(_PATCHED_HASS)
 
 
 def patch_wyzeapy_http(hass: HomeAssistant) -> None:
     """Patch wyzeapy to use Home Assistant's shared aiohttp session."""
+    global _PATCHED_HASS
+
+    _PATCHED_HASS = hass
+
     if getattr(WyzeAuthLib, "_ha_wyzeapi_http_patched", False):
         return
-
-    def _session():
-        return async_get_clientsession(hass)
 
     async def _request_json(
         self: WyzeAuthLib,
@@ -70,23 +81,12 @@ def patch_wyzeapy_http(hass: HomeAssistant) -> None:
             data=data,
         )
 
-    async def get(
-        self: WyzeAuthLib,
-        url: str,
-        headers: dict[str, str] | None = None,
-    ) -> dict[str, Any]:
-        return await _request_json(
-            self,
-            "GET",
-            url,
-            headers=headers,
-        )
-
     async def put(
         self: WyzeAuthLib,
         url: str,
         json: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
+        data: Any = None,
     ) -> dict[str, Any]:
         return await _request_json(
             self,
@@ -94,58 +94,73 @@ def patch_wyzeapy_http(hass: HomeAssistant) -> None:
             url,
             json=json,
             headers=headers,
+            data=data,
+        )
+
+    async def get(
+        self: WyzeAuthLib,
+        url: str,
+        headers: dict[str, str] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return await _request_json(
+            self,
+            "GET",
+            url,
+            headers=headers,
+            params=params,
         )
 
     async def patch(
         self: WyzeAuthLib,
         url: str,
-        json: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
+        params: dict[str, Any] | None = None,
+        json: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return await _request_json(
             self,
             "PATCH",
             url,
-            json=json,
             headers=headers,
+            params=params,
+            json=json,
         )
 
     async def delete(
         self: WyzeAuthLib,
         url: str,
-        json: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
+        json: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return await _request_json(
             self,
             "DELETE",
             url,
-            json=json,
             headers=headers,
+            json=json,
         )
 
     async def refresh(self: WyzeAuthLib) -> None:
-        """Refresh Wyze token using HA's managed aiohttp session."""
+        """Refresh Wyze token using Home Assistant's shared session."""
         payload = {
+            "phone_id": PHONE_ID,
             "app_name": APP_NAME,
             "app_version": APP_VERSION,
-            "phone_system_type": PHONE_SYSTEM_TYPE,
             "sc": SC,
             "sv": SV,
+            "phone_system_type": PHONE_SYSTEM_TYPE,
+            "app_ver": APP_VER,
             "ts": int(time.time()),
-            "access_token": self.token.access_token,
             "refresh_token": self.token.refresh_token,
-            "phone_id": PHONE_ID,
         }
-
-        headers = {"X-API-Key": API_KEY}
 
         response_json = await _request_json(
             self,
             "POST",
             _REFRESH_TOKEN_URL,
             json=payload,
-            headers=headers,
+            headers={"X-API-Key": API_KEY},
         )
 
         check_for_errors_standard(self, response_json)
@@ -159,8 +174,8 @@ def patch_wyzeapy_http(hass: HomeAssistant) -> None:
             await self.token_callback(self.token)
 
     WyzeAuthLib.post = post
-    WyzeAuthLib.get = get
     WyzeAuthLib.put = put
+    WyzeAuthLib.get = get
     WyzeAuthLib.patch = patch
     WyzeAuthLib.delete = delete
     WyzeAuthLib.refresh = refresh
