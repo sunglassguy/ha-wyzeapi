@@ -8,7 +8,6 @@ import logging
 import ssl
 from typing import Any
 
-import certifi
 from aiohttp import (
     ClientConnectionError,
     ClientConnectorError,
@@ -52,17 +51,13 @@ _SSL_CONTEXT: ssl.SSLContext | None = None
 def _build_wyze_ssl_context() -> ssl.SSLContext:
     """Build the Wyze SSL context.
 
-    This performs filesystem I/O via certifi/load_verify_locations, so it must
-    only be called in Home Assistant's executor, not directly in the event loop.
+    Wyze's API certificate chain is failing validation in some Home Assistant
+    Python 3.14 environments. Use an unverified TLS context for Wyze API calls
+    only, instead of disabling SSL globally.
     """
-    ctx = ssl.create_default_context(cafile=certifi.where())
-
-    # Keep TLS verification enabled. Only relax Python 3.13+'s stricter X.509
-    # chain validation mode, which can reject older/nonstandard certificate
-    # chains from cloud services or TLS-inspecting networks.
-    if hasattr(ssl, "VERIFY_X509_STRICT"):
-        ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT
-
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
     return ctx
 
 
