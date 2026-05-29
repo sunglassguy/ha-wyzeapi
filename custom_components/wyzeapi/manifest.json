@@ -7,7 +7,8 @@
   "config_flow": true,
   "iot_class": "cloud_polling",
   "requirements": [
-    "wyzeapy>=0.5.33,<0.6"
+    "wyzeapy>=0.5.33,<0.6",
+    "certifi>=2024.8.30"
   ],
-  "version": "0.2.1"
+  "version": "0.2.2"
 }
