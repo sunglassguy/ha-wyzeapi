@@ -1,3 +1,5 @@
+"""HTTP helpers for Wyze cloud calls."""
+
 from __future__ import annotations
 
 import asyncio
@@ -113,8 +115,8 @@ async def request_json_with_retries(
     """Request JSON from Wyze with timeout, SSL context, and retries."""
     kwargs["timeout"] = kwargs.get("timeout", WYZE_REQUEST_TIMEOUT)
 
-    # Important: force our Wyze SSL context. Do not use setdefault here.
-    # Some callers or session defaults may already provide ssl=True.
+    # Force our Wyze SSL context. Do not use setdefault here because some
+    # callers or session defaults may already provide ssl=True.
     kwargs["ssl"] = wyze_ssl_context()
 
     last_err: BaseException | None = None
