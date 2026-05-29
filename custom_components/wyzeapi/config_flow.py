@@ -28,6 +28,7 @@ from .const import (
     REFRESH_TOKEN,
 )
 from .wyzeapy_patch import patch_wyzeapy_http
+from .http import async_setup_wyze_http
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -61,7 +62,9 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     async def get_client(self) -> None:
         """Create a patched wyzeapy client if one has not been created yet."""
+        await async_setup_wyze_http(self.hass)
         patch_wyzeapy_http(self.hass)
+
         if not self.client:
             self.client = await Wyzeapy.create()
 
