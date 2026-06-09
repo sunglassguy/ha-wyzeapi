@@ -68,7 +68,7 @@ async def async_setup_wyze_http(hass: HomeAssistant) -> None:
     if _SSL_CONTEXT is None:
         _SSL_CONTEXT = await hass.async_add_executor_job(_build_wyze_ssl_context)
 
-        _LOGGER.warning(
+        _LOGGER.debug(
             "Wyze API TLS certificate verification is disabled for this integration "
             "only. check_hostname=%s verify_mode=%s",
             _SSL_CONTEXT.check_hostname,
