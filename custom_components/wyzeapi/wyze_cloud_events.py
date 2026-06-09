@@ -119,7 +119,7 @@ def sign_msg(app_id: str, msg: str | dict, token: str = "") -> str:
 
 def sign_payload(auth: WyzeCredential, app_id: str, payload: str) -> dict[str, str]:
     if not auth.access_token:
-        raise AccessTokenError()
+        raise AccessTokenError("Missing Wyze access token")
 
     return {
         "content-type": "application/json",
@@ -171,6 +171,12 @@ def _check_rate_limit(headers) -> None:
 
 
 async def _validate_resp(resp) -> dict:
+    if resp.status == 401:
+        body = await resp.text()
+        raise AccessTokenError(
+            f"Wyze cloud authorization failed: status=401 body={body[:300]}"
+        )
+
     if is_transient_status(resp.status):
         body = await resp.text()
         raise ClientResponseError(
@@ -206,7 +212,7 @@ async def _validate_resp(resp) -> dict:
     code = str(data.get("code", data.get("errorCode", 0)))
 
     if code == "2001":
-        raise AccessTokenError()
+        raise AccessTokenError("Wyze API returned token-expired code 2001")
 
     if code not in {"1", "0"}:
         msg = data.get("msg", data.get("description", code))
@@ -239,6 +245,11 @@ class WyzeCloudEventsApi:
         self._key_id = key_id
         self._api_key = api_key
         self.auth: Optional[WyzeCredential] = auth
+
+        # With 2-second polling, avoid hammering/log-spamming Wyze when auth is
+        # temporarily broken or Wyze rate-limits the endpoint.
+        self._auth_retry_after = 0.0
+        self._last_unauthorized_log = 0.0
 
     @classmethod
     def from_config_entry(cls, hass: HomeAssistant, entry: ConfigEntry) -> "WyzeCloudEventsApi":
@@ -309,7 +320,10 @@ class WyzeCloudEventsApi:
             )
             return False
 
-        payload = {"email": self._email.strip(), "password": hash_password(self._password)}
+        payload = {
+            "email": self._email.strip(),
+            "password": hash_password(self._password),
+        }
         headers = _headers_for_login(self._key_id, self._api_key)
 
         data = await self._post_json(
@@ -332,6 +346,9 @@ class WyzeCloudEventsApi:
             or WyzeCredential().phone_id,
         )
 
+        if self.auth and self.auth.access_token:
+            self._auth_retry_after = 0.0
+
         return bool(self.auth and self.auth.access_token)
 
     async def _refresh(self) -> bool:
@@ -351,6 +368,9 @@ class WyzeCloudEventsApi:
         self.auth.access_token = data.get("access_token") or self.auth.access_token
         self.auth.refresh_token = data.get("refresh_token") or self.auth.refresh_token
 
+        if self.auth.access_token:
+            self._auth_retry_after = 0.0
+
         return bool(self.auth.access_token)
 
     async def post_device_v4(self, endpoint: str, params: dict) -> dict:
@@ -358,7 +378,7 @@ class WyzeCloudEventsApi:
             if not (await self._refresh()):
                 ok = await self._login()
                 if not ok:
-                    raise AccessTokenError()
+                    raise AccessTokenError("Could not refresh or login to Wyze")
 
         assert self.auth is not None
 
@@ -377,13 +397,20 @@ class WyzeCloudEventsApi:
         device_ids: Optional[list[str]] = None,
         last_ts_s: int = 0,
     ) -> List[Dict[str, Any]]:
-        current_ms = int(time.time() + 60) * 1000
+        now = time.time()
+
+        # Keep 2-second polling responsive when healthy, but avoid hammering Wyze
+        # every 2 seconds when auth is temporarily broken.
+        if now < self._auth_retry_after:
+            return []
+
+        current_ms = int(now + 60) * 1000
         params = {
             "count": 20,
             "order_by": 1,
             "begin_time": max((last_ts_s + 1) * 1_000, (current_ms - 1_000_000)),
             "end_time": current_ms,
-            "nonce": str(int(time.time() * 1000)),
+            "nonce": str(int(now * 1000)),
             "device_id_list": list(set(device_ids or [])),
             "event_value_list": [],
             "event_tag_list": [],
@@ -392,15 +419,50 @@ class WyzeCloudEventsApi:
         try:
             resp = await self.post_device_v4("get_event_list", params)
             return resp.get("event_list", []) or []
-        except AccessTokenError:
+
+        except AccessTokenError as ex:
+            _LOGGER.debug("Wyze cloud events token rejected; refreshing token: %s", ex)
+
+            # Force a refresh/login path, then retry once.
+            if self.auth:
+                self.auth.access_token = None
+
             if await self._refresh() or await self._login():
-                resp = await self.post_device_v4("get_event_list", params)
-                return resp.get("event_list", []) or []
+                try:
+                    resp = await self.post_device_v4("get_event_list", params)
+                    self._auth_retry_after = 0.0
+                    return resp.get("event_list", []) or []
+                except AccessTokenError as retry_ex:
+                    now = time.time()
+                    self._auth_retry_after = now + 60
+
+                    if now - self._last_unauthorized_log > 60:
+                        self._last_unauthorized_log = now
+                        _LOGGER.warning(
+                            "Wyze cloud events still unauthorized after token "
+                            "refresh; suppressing retries for 60 seconds: %s",
+                            retry_ex,
+                        )
+
+                    return []
+
+            now = time.time()
+            self._auth_retry_after = now + 60
+
+            if now - self._last_unauthorized_log > 60:
+                self._last_unauthorized_log = now
+                _LOGGER.warning(
+                    "Wyze cloud events unauthorized and token refresh/login failed; "
+                    "suppressing retries for 60 seconds"
+                )
 
             return []
+
         except RateLimitError as ex:
+            self._auth_retry_after = time.time() + 60
             _LOGGER.warning("Wyze events rate-limited; cooling down until %s", ex.reset_by)
             return []
+
         except Exception as ex:
             if is_transient_exception(ex):
                 raise
